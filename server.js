@@ -11,9 +11,9 @@ app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 8080;
 
-/* ============== DeepL (POZOR: hardcoded key – nepushuj verejne) ============== */
-const DEEPL_API_KEY = "09009672-d794-48b4-b378-a50b51275261:fx"; // ⚠️ len na test lokálne
-const DEEPL_BASE_URL = "https://api-free.deepl.com";
+/* ======================= DeepL ======================= */
+const DEEPL_API_KEY  = process.env.DEEPL_API_KEY;
+const DEEPL_BASE_URL = process.env.DEEPL_BASE_URL || "https://api-free.deepl.com";
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -23,7 +23,6 @@ app.post("/translate", async (req, res) => {
     if (!text || !targetLang) {
       return res.status(400).json({ error: "Chýba text alebo targetLang" });
     }
-
     const params = new URLSearchParams();
     params.append("text", text);
     params.append("target_lang", String(targetLang).toUpperCase());
@@ -42,35 +41,39 @@ app.post("/translate", async (req, res) => {
     );
 
     return res.json({ translatedText: r.data?.translations?.[0]?.text ?? "" });
-  } catch (err) {
-    console.error(err?.response?.data || err.message);
+  } catch (e) {
+    console.error("DEEPL /translate error:", e?.response?.status, e?.response?.data || e.message);
     return res.status(500).json({ error: "Server chyba" });
   }
 });
 
-/* ======================= ElevenLabs TTS (POZOR: key) ======================== */
-// ⚠️ Na ostro radšej použij: const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY;
-const ELEVEN_API_KEY = "5734c1ecea86d866397b17847e30b4057e971ead9fb7864f4c25bbbc01d42c35"; // len dočasne
-const ELEVEN_BASE = "https://api.elevenlabs.io";
+/* ======================= ElevenLabs ======================= */
+const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY;
+const ELEVEN_BASE    = "https://api.elevenlabs.io";
 
-// Zoznam hlasov
+// → Voices (presne podľa tvojho snippetu)
 app.get("/voices", async (_req, res) => {
   try {
     if (!ELEVEN_API_KEY) return res.status(500).json({ error: "Missing ELEVEN_API_KEY" });
 
     const r = await axios.get(`${ELEVEN_BASE}/v1/voices`, {
-      headers: { "xi-api-key": ELEVEN_API_KEY },
-      timeout: 15000
+      headers: {
+        "xi-api-key": ELEVEN_API_KEY,
+        "Accept": "application/json"
+      },
+      timeout: 20000
     });
 
-    res.json(r.data?.voices || []);
+    return res.json(r.data?.voices || []);
   } catch (e) {
-    console.error(e?.response?.data || e.message);
-    res.status(500).json({ error: "Voices fetch failed" });
+    const code = e?.response?.status;
+    const data = e?.response?.data;
+    console.error("ELEVEN /voices error:", code, data);
+    return res.status(500).json({ error: "Voices fetch failed", details: code || "unknown" });
   }
 });
 
-// TTS – vráti MP3 (binary)
+// → TTS (vracia audio/mpeg)
 app.post("/tts", async (req, res) => {
   try {
     if (!ELEVEN_API_KEY) return res.status(500).json({ error: "Missing ELEVEN_API_KEY" });
@@ -96,12 +99,13 @@ app.post("/tts", async (req, res) => {
 
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
-    res.send(Buffer.from(r.data));
+    return res.send(Buffer.from(r.data));
   } catch (e) {
-    console.error(e?.response?.data || e.message);
-    res.status(500).json({ error: "TTS failed" });
+    const code = e?.response?.status;
+    console.error("ELEVEN /tts error:", code, e?.response?.data || e.message);
+    return res.status(500).json({ error: "TTS failed", details: code || "unknown" });
   }
 });
 
-/* ============================== Start server =============================== */
-app.listen(PORT, () => console.log(`🚀 DeepL/Eleven gateway running on port ${PORT}`));
+/* ======================= Start ======================= */
+app.listen(PORT, () => console.log(`🚀 API gateway running on port ${PORT}`));
