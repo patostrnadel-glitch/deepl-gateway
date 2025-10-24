@@ -62,7 +62,7 @@ app.post("/translate", async (req, res) => {
  */
 const ELEVEN_API_KEY =
   process.env.ELEVEN_API_KEY ||
-  "sk_817adefae6f81d0e49941b773a61e4173c15c4db58439d21";
+  "2d61fcbe3f34b323fe47a644ae6df93ddae34b2e64fe9cb5f9eec0b9c3da7fee";
 
 const ELEVEN_BASE = "https://api.elevenlabs.io";
 
