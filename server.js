@@ -2,6 +2,7 @@ import express from "express";
 import axios from "axios";
 import cors from "cors";
 import helmet from "helmet";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const app = express();
 
@@ -55,7 +56,7 @@ app.post("/translate", async (req, res) => {
 /* ======================= ElevenLabs ======================= */
 
 // ⛔ ŽIADNE hardcodnuté API kľúče v kóde.
-// ✅ Kľúč sa musí načítať len zo serverového prostredia (Render -> Environment Variables).
+// ✅ Kľúč sa musí načítať len zo serverového prostredia (Render → Environment Variables).
 const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY;
 const ELEVEN_BASE    = "https://api.elevenlabs.io";
 
@@ -93,7 +94,6 @@ app.get("/voices", async (_req, res) => {
     const data = e?.response?.data;
     console.error("ELEVEN /voices error:", code, data || e.message);
 
-    // Pošleme späť čo najviac, ale bezpečne
     return res.status(500).json({
       error: "Voices fetch failed",
       statusFromEleven: code,
@@ -152,7 +152,6 @@ app.post("/tts", async (req, res) => {
         }
       );
     } catch (err) {
-      // ElevenLabs odmietol požiadavku (napr. 401, 403, 402, 429...)
       const statusFromEleven = err?.response?.status || 500;
       const upstreamData     = err?.response?.data;
 
@@ -181,7 +180,6 @@ app.post("/tts", async (req, res) => {
       });
     }
 
-    // úspech -> pošleme mp3 binárne späť
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
 
@@ -192,6 +190,76 @@ app.post("/tts", async (req, res) => {
     return res.status(500).json({
       error: "Gateway crash",
       details: e.message
+    });
+  }
+});
+
+/* ======================= Gemini ======================= */
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+/**
+ * POST /templates/facebook-ad
+ *
+ * Body (JSON):
+ * {
+ *   "product": "AI káva s extra kofeínom",
+ *   "audience": "mladí podnikatelia",
+ *   "tone": "priateľský, energický",
+ *   "language": "slovenčina"
+ * }
+ *
+ * Response:
+ * {
+ *   "output": "text reklamy ..."
+ * }
+ */
+app.post("/templates/facebook-ad", async (req, res) => {
+  try {
+    const { product, audience, tone, language } = req.body || {};
+
+    if (!product || !audience || !language) {
+      return res.status(400).json({
+        error: "Chýba product / audience / language"
+      });
+    }
+
+    // Toto je tvoja prvá oficiálna šablóna (prompt recipe)
+    const prompt = `
+Si špičkový marketingový copywriter.
+Napíš 3 krátke varianty reklamného textu pre FACEBOOK ADS.
+
+Produkt: ${product}
+Cieľová skupina: ${audience}
+Tón komunikácie: ${tone || "priateľský, sebavedomý"}
+Jazyk výstupu: ${language}
+
+POŽIADAVKY:
+- Každá varianta max 2 vety.
+- Musí byť chytľavá a jasná, nie generická.
+- Použi priamu výzvu k akcii (napr. "Skús teraz", "Zisti viac").
+- Vráť výsledok v prehľadnej podobe:
+  Varianta 1:
+  ...
+  Varianta 2:
+  ...
+  Varianta 3:
+  ...
+`;
+
+    // Použijeme rýchly/lacný model pre marketingový text
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+
+    return res.json({ output: text });
+
+  } catch (err) {
+    console.error("Gemini /templates/facebook-ad error:", err?.response || err?.message || err);
+    return res.status(500).json({
+      error: "Template generation failed",
+      detail: err?.message || String(err)
     });
   }
 });
