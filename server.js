@@ -54,26 +54,22 @@ app.post("/translate", async (req, res) => {
 
 /* ======================= ElevenLabs ======================= */
 
-/**
- * Bezpečná verzia by bola len:
- * const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY;
- *
- * Ty ale chceš natvrdo vložiť svoj kľúč, takže spravíme fallback:
- */
-const ELEVEN_API_KEY =
-  process.env.ELEVEN_API_KEY ||
-  "2d61fcbe3f34b323fe47a644ae6df93ddae34b2e64fe9cb5f9eec0b9c3da7fee";
-
-const ELEVEN_BASE = "https://api.elevenlabs.io";
+// ⛔ ŽIADNE hardcodnuté API kľúče v kóde.
+// ✅ Kľúč sa musí načítať len zo serverového prostredia (Render -> Environment Variables).
+const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY;
+const ELEVEN_BASE    = "https://api.elevenlabs.io";
 
 /**
  * GET /voices
- * Vráti zoznam hlasov, ktoré vieš použiť vo frontendovom selecte.
+ * (Momentálne to frontend už nepotrebuje, ale nechávame ho pre debug.)
  */
 app.get("/voices", async (_req, res) => {
   try {
     if (!ELEVEN_API_KEY) {
-      return res.status(500).json({ error: "Missing ELEVEN_API_KEY" });
+      return res.status(500).json({
+        error: "Missing ELEVEN_API_KEY on server",
+        hint: "Nastav ELEVEN_API_KEY v Render → Environment Variables."
+      });
     }
 
     const r = await axios.get(`${ELEVEN_BASE}/v1/voices`, {
@@ -84,36 +80,40 @@ app.get("/voices", async (_req, res) => {
       timeout: 20000
     });
 
-    // Normalizujeme len na to, čo WP potrebuje (id + meno)
     const simplified = (r.data?.voices || []).map(v => ({
       voice_id: v.voice_id,
       name: v.name,
-      category: v.category,
-      labels: v.labels
+      category: v.category ?? null,
+      labels: v.labels ?? null
     }));
 
     return res.json(simplified);
   } catch (e) {
-    const code = e?.response?.status;
+    const code = e?.response?.status || 500;
     const data = e?.response?.data;
     console.error("ELEVEN /voices error:", code, data || e.message);
+
+    // Pošleme späť čo najviac, ale bezpečne
     return res.status(500).json({
       error: "Voices fetch failed",
-      details: code || "unknown"
+      statusFromEleven: code,
+      upstream: data || e.message
     });
   }
 });
 
-
 /**
  * POST /tts
  * Body: { text: "...", voiceId: "...", model?: "...", voice_settings?: {...} }
- * Návrat: audio/mpeg (binárne MP3)
+ * Výstup: audio/mpeg (binárny MP3 stream)
  */
 app.post("/tts", async (req, res) => {
   try {
     if (!ELEVEN_API_KEY) {
-      return res.status(500).json({ error: "Missing ELEVEN_API_KEY" });
+      return res.status(500).json({
+        error: "Missing ELEVEN_API_KEY on server",
+        hint: "Nastav ELEVEN_API_KEY v Render → Environment Variables."
+      });
     }
 
     const {
@@ -136,31 +136,62 @@ app.post("/tts", async (req, res) => {
       }
     };
 
-    const r = await axios.post(
-      `${ELEVEN_BASE}/v1/text-to-speech/${voiceId}`,
-      payload,
-      {
-        headers: {
-          "xi-api-key": ELEVEN_API_KEY,
-          "Content-Type": "application/json",
-          "Accept": "audio/mpeg"
-        },
-        // dôležité: očakávame binárne audio
-        responseType: "arraybuffer",
-        timeout: 60000
-      }
-    );
+    let elevenResp;
+    try {
+      elevenResp = await axios.post(
+        `${ELEVEN_BASE}/v1/text-to-speech/${voiceId}`,
+        payload,
+        {
+          headers: {
+            "xi-api-key": ELEVEN_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg"
+          },
+          responseType: "arraybuffer",
+          timeout: 60000
+        }
+      );
+    } catch (err) {
+      // ElevenLabs odmietol požiadavku (napr. 401, 403, 402, 429...)
+      const statusFromEleven = err?.response?.status || 500;
+      const upstreamData     = err?.response?.data;
 
+      console.error(
+        "ELEVEN /tts error:",
+        statusFromEleven,
+        upstreamData || err.message
+      );
+
+      let upstreamText = "";
+      if (upstreamData) {
+        try {
+          upstreamText = Buffer.isBuffer(upstreamData)
+            ? upstreamData.toString("utf8")
+            : JSON.stringify(upstreamData);
+        } catch (_e) {
+          upstreamText = String(upstreamData);
+        }
+      }
+
+      return res.status(500).json({
+        error: "TTS failed",
+        statusFromEleven,
+        upstream: upstreamText || err.message,
+        note: "Najčastejšie: zlý/expired API kľúč, hlas nedostupný pre tento účet, alebo vyčerpané kredity."
+      });
+    }
+
+    // úspech -> pošleme mp3 binárne späť
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
-    // Buffer.from aby Node neposlal [object Object]
-    return res.send(Buffer.from(r.data));
+
+    return res.send(Buffer.from(elevenResp.data));
+
   } catch (e) {
-    const code = e?.response?.status;
-    console.error("ELEVEN /tts error:", code, e?.response?.data || e.message);
+    console.error("SERVER /tts handler crash:", e.message);
     return res.status(500).json({
-      error: "TTS failed",
-      details: code || "unknown"
+      error: "Gateway crash",
+      details: e.message
     });
   }
 });
