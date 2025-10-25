@@ -14,9 +14,10 @@ app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 8080;
 
+// healthcheck
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// pripojenie jednotlivých skupín endpointov
+// pripojenie jednotlivých modulov
 app.use("/", deeplRoutes);
 app.use("/", elevenRoutes);
 app.use("/", geminiRoutes);
