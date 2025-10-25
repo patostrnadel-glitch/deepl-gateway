@@ -32,17 +32,13 @@ app.post("/translate", async (req, res) => {
       params.append("source_lang", String(sourceLang).toUpperCase());
     }
 
-    const r = await axios.post(
-      `${DEEPL_BASE_URL}/v2/translate`,
-      params,
-      {
-        headers: {
-          "Authorization": `DeepL-Auth-Key ${DEEPL_API_KEY}`,
-          "Content-Type": "application/x-www-form-urlencoded"
-        },
-        timeout: 15000
-      }
-    );
+    const r = await axios.post(`${DEEPL_BASE_URL}/v2/translate`, params, {
+      headers: {
+        "Authorization": `DeepL-Auth-Key ${DEEPL_API_KEY}`,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      timeout: 15000
+    });
 
     return res.json({
       translatedText: r.data?.translations?.[0]?.text ?? ""
@@ -54,16 +50,9 @@ app.post("/translate", async (req, res) => {
 });
 
 /* ======================= ElevenLabs ======================= */
-
-// ⛔ ŽIADNE hardcodnuté API kľúče v kóde.
-// ✅ Kľúč sa musí načítať len zo serverového prostredia (Render → Environment Variables).
 const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY;
-const ELEVEN_BASE    = "https://api.elevenlabs.io";
+const ELEVEN_BASE = "https://api.elevenlabs.io";
 
-/**
- * GET /voices
- * (Momentálne to frontend už nepotrebuje, ale nechávame ho pre debug.)
- */
 app.get("/voices", async (_req, res) => {
   try {
     if (!ELEVEN_API_KEY) {
@@ -93,7 +82,6 @@ app.get("/voices", async (_req, res) => {
     const code = e?.response?.status || 500;
     const data = e?.response?.data;
     console.error("ELEVEN /voices error:", code, data || e.message);
-
     return res.status(500).json({
       error: "Voices fetch failed",
       statusFromEleven: code,
@@ -102,11 +90,6 @@ app.get("/voices", async (_req, res) => {
   }
 });
 
-/**
- * POST /tts
- * Body: { text: "...", voiceId: "...", model?: "...", voice_settings?: {...} }
- * Výstup: audio/mpeg (binárny MP3 stream)
- */
 app.post("/tts", async (req, res) => {
   try {
     if (!ELEVEN_API_KEY) {
@@ -116,13 +99,7 @@ app.post("/tts", async (req, res) => {
       });
     }
 
-    const {
-      text,
-      voiceId,
-      model = "eleven_multilingual_v2",
-      voice_settings
-    } = req.body || {};
-
+    const { text, voiceId, model = "eleven_multilingual_v2", voice_settings } = req.body || {};
     if (!text || !voiceId) {
       return res.status(400).json({ error: "text a voiceId sú povinné" });
     }
@@ -130,89 +107,44 @@ app.post("/tts", async (req, res) => {
     const payload = {
       text,
       model_id: model,
-      voice_settings: voice_settings || {
-        stability: 0.4,
-        similarity_boost: 0.8
-      }
+      voice_settings: voice_settings || { stability: 0.4, similarity_boost: 0.8 }
     };
 
-    let elevenResp;
-    try {
-      elevenResp = await axios.post(
-        `${ELEVEN_BASE}/v1/text-to-speech/${voiceId}`,
-        payload,
-        {
-          headers: {
-            "xi-api-key": ELEVEN_API_KEY,
-            "Content-Type": "application/json",
-            "Accept": "audio/mpeg"
-          },
-          responseType: "arraybuffer",
-          timeout: 60000
-        }
-      );
-    } catch (err) {
-      const statusFromEleven = err?.response?.status || 500;
-      const upstreamData     = err?.response?.data;
-
-      console.error(
-        "ELEVEN /tts error:",
-        statusFromEleven,
-        upstreamData || err.message
-      );
-
-      let upstreamText = "";
-      if (upstreamData) {
-        try {
-          upstreamText = Buffer.isBuffer(upstreamData)
-            ? upstreamData.toString("utf8")
-            : JSON.stringify(upstreamData);
-        } catch (_e) {
-          upstreamText = String(upstreamData);
-        }
+    const elevenResp = await axios.post(
+      `${ELEVEN_BASE}/v1/text-to-speech/${voiceId}`,
+      payload,
+      {
+        headers: {
+          "xi-api-key": ELEVEN_API_KEY,
+          "Content-Type": "application/json",
+          "Accept": "audio/mpeg"
+        },
+        responseType: "arraybuffer",
+        timeout: 60000
       }
-
-      return res.status(500).json({
-        error: "TTS failed",
-        statusFromEleven,
-        upstream: upstreamText || err.message,
-        note: "Najčastejšie: zlý/expired API kľúč, hlas nedostupný pre tento účet, alebo vyčerpané kredity."
-      });
-    }
+    );
 
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
-
     return res.send(Buffer.from(elevenResp.data));
-
-  } catch (e) {
-    console.error("SERVER /tts handler crash:", e.message);
+  } catch (err) {
+    const statusFromEleven = err?.response?.status || 500;
+    const upstreamData = err?.response?.data;
+    console.error("ELEVEN /tts error:", statusFromEleven, upstreamData || err.message);
     return res.status(500).json({
-      error: "Gateway crash",
-      details: e.message
+      error: "TTS failed",
+      statusFromEleven,
+      upstream: upstreamData || err.message,
+      note: "Zlý/expired API kľúč alebo vyčerpané kredity."
     });
   }
 });
 
 /* ======================= Gemini ======================= */
-
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 /**
  * POST /templates/facebook-ad
- *
- * Body (JSON):
- * {
- *   "product": "AI káva s extra kofeínom",
- *   "audience": "mladí podnikatelia",
- *   "tone": "priateľský, energický",
- *   "language": "slovenčina"
- * }
- *
- * Response:
- * {
- *   "output": "text reklamy ..."
- * }
  */
 app.post("/templates/facebook-ad", async (req, res) => {
   try {
@@ -224,7 +156,6 @@ app.post("/templates/facebook-ad", async (req, res) => {
       });
     }
 
-    // Toto je tvoja prvá oficiálna šablóna (prompt recipe)
     const prompt = `
 Si špičkový marketingový copywriter.
 Napíš 3 krátke varianty reklamného textu pre FACEBOOK ADS.
@@ -245,11 +176,9 @@ POŽIADAVKY:
   ...
   Varianta 3:
   ...
-`;
+`.trim();
 
-    // Použijeme rýchly/lacný model pre marketingový text
-    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
     const result = await model.generateContent(prompt);
     const text = result.response.text();
 
