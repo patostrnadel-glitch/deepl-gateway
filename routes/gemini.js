@@ -1,15 +1,24 @@
-import express from "express";
-import { GoogleGenerativeAI } from "@google/generative-ai";
-
-const router = express.Router();
-
+if (!process.env.GEMINI_API_KEY) {
+  console.warn(
+    "⚠️  GEMINI_API_KEY nie je nastavený! Bez toho /templates/facebook-ad nebude fungovať."
+  );
+}
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 /**
  * POST /templates/facebook-ad
- * Generuje text pre FB reklamu
+ * Body:
+ * {
+ *   "product": "čo predávaš",
+ *   "audience": "koho cieľiš",
+ *   "tone": "tón komunikácie (optional)",
+ *   "language": "slovenčina / english / ... "
+ * }
+ *
+ * Response:
+ * { "output": "Varianta 1:\n...\nVarianta 2:\n..." }
  */
-router.post("/templates/facebook-ad", async (req, res) => {
+app.post("/templates/facebook-ad", async (req, res) => {
   try {
     const { product, audience, tone, language } = req.body || {};
 
@@ -32,23 +41,26 @@ POŽIADAVKY:
 - Každá varianta max 2 vety.
 - Musí byť chytľavá a jasná, nie generická.
 - Použi priamu výzvu k akcii (napr. "Skús teraz", "Zisti viac").
-- Výstup vo formáte:
+- Vráť výsledok v prehľadnej podobe:
   Varianta 1:
+  ...
   Varianta 2:
+  ...
   Varianta 3:
+  ...
 `.trim();
 
+    // tu je dôležité: používame nový platný model
     const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash"
+      model: "gemini-2.5-pro" // môžeš dať "gemini-2.5-flash" ak chceš lacnejšie/rýchlejšie
     });
 
     const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    const text = result?.response?.text?.() || "";
 
     return res.json({ output: text });
-
   } catch (err) {
-    console.error("Gemini /templates/facebook-ad error:", err?.response || err?.message || err);
+    console.error("Gemini /templates/facebook-ad error:", err);
     return res.status(500).json({
       error: "Template generation failed",
       detail: err?.message || String(err)
@@ -56,54 +68,7 @@ POŽIADAVKY:
   }
 });
 
-/**
- * POST /templates/youtube-title
- * Generuje SEO-friendly YouTube titulky
- */
-router.post("/templates/youtube-title", async (req, res) => {
-  try {
-    const { topic, language } = req.body || {};
-
-    if (!topic || !language) {
-      return res.status(400).json({
-        error: "Chýba topic / language"
-      });
-    }
-
-    const prompt = `
-Si expert na YouTube SEO a CTR (click-through rate).
-Vymysli 5 pútavých titulkov pre YouTube video.
-
-Téma videa: ${topic}
-Jazyk výstupu: ${language}
-
-Požiadavky:
-- Každý titulok do ~65 znakov.
-- Klikateľné, ale nie fake clickbait.
-- Použi formát:
-1. ...
-2. ...
-3. ...
-4. ...
-5. ...
-`.trim();
-
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash"
-    });
-
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
-
-    return res.json({ output: text });
-
-  } catch (err) {
-    console.error("Gemini /templates/youtube-title error:", err?.response || err?.message || err);
-    return res.status(500).json({
-      error: "Template generation failed",
-      detail: err?.message || String(err)
-    });
-  }
+/* ======================= Start ======================= */
+app.listen(PORT, () => {
+  console.log(`🚀 API gateway running on port ${PORT}`);
 });
-
-export default router;
