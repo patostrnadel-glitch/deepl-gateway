@@ -6,7 +6,7 @@ import deeplRoutes from "./routes/deepl.js";
 import elevenRoutes from "./routes/elevenlabs.js";
 import geminiRoutes from "./routes/gemini.js";
 import heygenRoutes from "./routes/heygen.js";
-import photoAvatarRoutes from "./routes/photoavatar.js"; // musí sedieť s názvom súboru
+import photoAvatarRoutes from "./routes/photoAvatar.js"; // musí sedieť s názvom súboru
 
 const app = express();
 
