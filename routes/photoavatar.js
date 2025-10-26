@@ -5,24 +5,7 @@ const router = express.Router();
 
 /**
  * POST /photo-avatar/generate
- *
- * Očakávaný body z frontendu:
- * {
- *   "name": "Lina",
- *   "age": "Young Adult",
- *   "gender": "Woman",
- *   "ethnicity": "Asian American",
- *   "orientation": "horizontal",
- *   "pose": "half_body",
- *   "style": "Realistic",
- *   "appearance": "A stylish East Asian Woman in casual attire walking through a bustling city street"
- * }
- *
- * Návrat:
- * {
- *   "generationId": "def3076d2c8b4929acf269d8ea6b562e",
- *   "status": "requested"
- * }
+ * Pošle požiadavku na HeyGen, aby vytvoril AI fotky avatara.
  */
 router.post("/photo-avatar/generate", async (req, res) => {
   try {
@@ -61,7 +44,7 @@ router.post("/photo-avatar/generate", async (req, res) => {
       });
     }
 
-    // Zavoláme HeyGen Photo Avatar generate endpoint
+    // zavoláme HeyGen Photo Avatar API
     const heygenResp = await axios.post(
       "https://api.heygen.com/v2/photo_avatar/photo/generate",
       {
@@ -85,7 +68,6 @@ router.post("/photo-avatar/generate", async (req, res) => {
     );
 
     const data = heygenResp.data;
-
     const generationId =
       data?.data?.generation_id || data?.generation_id || null;
 
@@ -95,8 +77,7 @@ router.post("/photo-avatar/generate", async (req, res) => {
 
     return res.json({
       generationId,
-      status: "requested",
-      raw: data // voliteľné, môžeš vymazať
+      status: "requested"
     });
   } catch (err) {
     console.error(
@@ -113,24 +94,7 @@ router.post("/photo-avatar/generate", async (req, res) => {
 
 /**
  * GET /photo-avatar/status/:generationId
- *
- * Polling endpoint.
- *
- * Návrat:
- * - počas generovania:
- * {
- *   "status": "in_progress",
- *   "images": []
- * }
- *
- * - po dokončení:
- * {
- *   "status": "success",
- *   "images": [
- *      "https://resource2.heygen.ai/image/....",
- *      "https://resource2.heygen.ai/image/...."
- *   ]
- * }
+ * Polling na zistenie stavu generovania.
  */
 router.get("/photo-avatar/status/:generationId", async (req, res) => {
   try {
@@ -149,8 +113,6 @@ router.get("/photo-avatar/status/:generationId", async (req, res) => {
       });
     }
 
-    // podľa tvojej dokumentácie:
-    // GET https://api.heygen.com/v2/photo_avatar/generation/{id}
     const statusResp = await axios.get(
       `https://api.heygen.com/v2/photo_avatar/generation/${generationId}`,
       {
