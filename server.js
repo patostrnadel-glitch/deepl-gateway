@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import mysql from "mysql2/promise";
+import dotenv from "dotenv";
 
 import deeplRoutes from "./routes/deepl.js";
 import elevenRoutes from "./routes/elevenlabs.js";
@@ -9,13 +10,17 @@ import geminiRoutes from "./routes/gemini.js";
 import heygenRoutes from "./routes/heygen.js";
 import photoAvatarRoutes from "./routes/photoAvatar.js"; // musí sedieť s názvom súboru
 
+// Načítaj .env premenné (lokálne). Na Renderi to číta z Environment Variables.
+dotenv.config();
+
 // ====== DB PRIPOJENIE =====================================
-// !!! DOPLŇ SVOJE HODNOTY podľa phpMyAdmin (host, user, password, database)
+// Hodnoty nebudú natvrdo v kóde. Budú v env premenných:
+// DB_HOST, DB_USER, DB_PASS, DB_NAME
 const dbConfig = {
-  host: "127.0.0.1",        // alebo IP/host tvojho MySQL
-  user: "DB_USERNAME",      // napr. root alebo user z hostingu
-  password: "DB_PASSWORD",  // heslo
-  database: "6tnu6dcoxg8p"  // názov DB v phpMyAdmin
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASS,
+  database: process.env.DB_NAME
 };
 
 let db;
@@ -28,7 +33,6 @@ async function initDB() {
   });
   console.log("✅ DB pool ready");
 }
-// spustíme initDB nižšie pred app.listen()
 // ===========================================================
 
 const app = express();
@@ -153,8 +157,7 @@ app.post("/consume", async (req, res) => {
       return res.status(402).json({ error: "INSUFFICIENT_CREDITS" });
     }
 
-    // 4. odpočítanie kreditov + zápis do usage_logs
-    //    urobíme to ako transakciu aby sa to nerozbilo pri dvoch paralelných requestoch
+    // 4. odpočítanie kreditov + zápis do usage_logs (transakčne)
     const connection = await db.getConnection();
     try {
       await connection.beginTransaction();
@@ -209,12 +212,15 @@ app.post("/consume", async (req, res) => {
     } catch (err) {
       await connection.rollback();
       connection.release();
-      console.error("TX ERROR", err);
-      return res.status(500).json({ error: "TX_FAILED" });
+      console.error("TX ERROR", err.message, err.stack);
+      return res.status(500).json({ error: "TX_FAILED", detail: err.message });
     }
   } catch (err) {
-    console.error("consume error", err);
-    return res.status(500).json({ error: "SERVER_ERROR" });
+    // sem padajú chyby ako "nedokážem sa pripojiť na DB", "access denied", atď.
+    console.error("consume error", err.message, err.stack);
+    return res
+      .status(500)
+      .json({ error: "SERVER_ERROR", detail: err.message });
   }
 });
 
@@ -265,8 +271,10 @@ app.get("/usage/:wp_user_id", async (req, res) => {
       recent_usage: logs
     });
   } catch (err) {
-    console.error("usage error", err);
-    return res.status(500).json({ error: "SERVER_ERROR" });
+    console.error("usage error", err.message, err.stack);
+    return res
+      .status(500)
+      .json({ error: "SERVER_ERROR", detail: err.message });
   }
 });
 
@@ -377,8 +385,10 @@ app.post("/webhook/subscription-update", async (req, res) => {
 
     return res.json({ ok: true });
   } catch (err) {
-    console.error("webhook error", err);
-    return res.status(500).json({ error: "SERVER_ERROR" });
+    console.error("webhook error", err.message, err.stack);
+    return res
+      .status(500)
+      .json({ error: "SERVER_ERROR", detail: err.message });
   }
 });
 
@@ -398,6 +408,6 @@ initDB()
     });
   })
   .catch((err) => {
-    console.error("DB INIT FAILED", err);
+    console.error("DB INIT FAILED", err.message, err.stack);
     process.exit(1);
   });
