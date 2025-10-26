@@ -5,8 +5,8 @@ import { db } from "../db.js";
 
 const router = express.Router();
 
-const SHARED_SECRET = process.env.SHARED_SECRET; // bude v Render env
-const JWT_SECRET = process.env.JWT_SECRET;       // bude v Render env
+const SHARED_SECRET = process.env.SHARED_SECRET; // nastavíš v Render env
+const JWT_SECRET = process.env.JWT_SECRET;       // nastavíš v Render env
 
 function makeSignature(wp_user_id, email) {
   return crypto
@@ -15,25 +15,25 @@ function makeSignature(wp_user_id, email) {
     .digest("hex");
 }
 
+// pokúsi sa nájsť usera podľa wp_user_id, ak neexistuje -> vytvorí
 async function findOrCreateUser(wp_user_id, email) {
-  // pokúsime sa ho nájsť
+  // skúsi nájsť
   const [rows] = await db.query(
     "SELECT id, wp_user_id, email FROM users WHERE wp_user_id = ?",
     [wp_user_id]
   );
 
   if (rows.length > 0) {
-    // používateľ existuje
     return rows[0];
   }
 
-  // ak neexistuje, vložíme nového
-  const [result] = await db.query(
+  // nevie nájsť -> vytvor
+  await db.query(
     "INSERT INTO users (wp_user_id, email) VALUES (?, ?)",
     [wp_user_id, email]
   );
 
-  // teraz potrebujeme načítať nový záznam vrátane id (UUID sa vytvorí defaultom)
+  // načítaj znova
   const [rowsAfter] = await db.query(
     "SELECT id, wp_user_id, email FROM users WHERE wp_user_id = ?",
     [wp_user_id]
@@ -56,10 +56,10 @@ router.post("/auth/wp-login-exchange", async (req, res) => {
       return res.status(403).json({ error: "bad_signature" });
     }
 
-    // nájdi alebo vytvor user v DB
+    // user v DB
     const user = await findOrCreateUser(wp_user_id, email);
 
-    // vygeneruj krátkodobý JWT
+    // vytvor krátkodobý JWT pre frontend (dashboard)
     const token = jwt.sign(
       {
         user_id: user.id,
@@ -67,7 +67,7 @@ router.post("/auth/wp-login-exchange", async (req, res) => {
         email: user.email,
       },
       JWT_SECRET,
-      { expiresIn: "15m" } // token platí 15 minút
+      { expiresIn: "15m" }
     );
 
     return res.json({ jwt: token });
