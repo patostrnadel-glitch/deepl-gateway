@@ -114,22 +114,41 @@ async function getActiveSubscriptionAndBalance(user_id) {
 // request body očakáva:
 // {
 //   "wp_user_id": 123,
-//   "feature_type": "heygen_video" alebo "gemini_chat",
-//   "metadata": {... ak chceš },
-//   "estimated_cost": 10    <-- ZATIAĽ hardcode z frontu alebo vypočítané
+//   "feature_type": "translate_text" | "gemini_chat" | "heygen_video" | ...
+//   "metadata": {... optional info o požiadavke }
 // }
 //
-// POZOR: momentálne nevoláme reálne API HeyGen/Gemini tu,
-// riešime len kredity/logiku limitov
-//
+// Dôležité: už NEberieme cenu z frontendu. Cenu určuje PRICING tu na backende.
+// ===========================================================
 app.post("/consume", async (req, res) => {
   try {
-    const { wp_user_id, feature_type, metadata, estimated_cost } = req.body;
+    const { wp_user_id, feature_type, metadata } = req.body;
 
-    if (!wp_user_id || !feature_type || !estimated_cost) {
+    // 0. validácia vstupu
+    if (!wp_user_id || !feature_type) {
       return res.status(400).json({
         error: "MISSING_FIELDS",
-        details: "wp_user_id, feature_type, estimated_cost are required"
+        details: "wp_user_id and feature_type are required"
+      });
+    }
+
+    // 💸 CENNÍK ZA FUNKCIE (TU SI NASTAV SVOJE CENY)
+    // Každý typ akcie = koľko kreditov stojí jedno použitie.
+    const PRICING = {
+      translate_text: 5,   // preklad textu (DeepL klon)
+      gemini_chat: 5,      // AI chat
+      heygen_video: 200,   // video avatar generácia
+      voice_tts: 2,        // text -> hlas
+      photo_avatar: 50,    // AI fotka/avatar
+      test_feature: 10     // tvoj pôvodný test
+    };
+
+    // nájdeme cenu
+    const estimated_cost = PRICING[feature_type];
+    if (typeof estimated_cost === "undefined") {
+      return res.status(400).json({
+        error: "UNKNOWN_FEATURE_TYPE",
+        details: `No pricing rule for feature_type=${feature_type}`
       });
     }
 
@@ -205,6 +224,7 @@ app.post("/consume", async (req, res) => {
       await connection.commit();
       connection.release();
 
+      // vraciame, aby frontend vedel pokračovať (napr. zavolať samotný preklad)
       return res.json({
         ok: true,
         credits_remaining: newBalance
@@ -229,13 +249,12 @@ app.post("/consume", async (req, res) => {
 //
 // vráti:
 // {
-//   plan_id: "pro",
-//   credits_remaining: 39000,
-//   monthly_credit_limit: 40000,
-//   cycle_end: "2025-11-26 10:00:00",
+//   plan_id: "...",                // ID plánu z subscriptions
+//   credits_remaining: 39000,      // zostatok kreditov
+//   monthly_credit_limit: 40000,   // mesačný balík
+//   cycle_end: "2025-11-26 ...",   // dokedy platí toto obdobie
 //   recent_usage: [ { timestamp, feature_type, credits_spent }, ... ]
 // }
-//
 app.get("/usage/:wp_user_id", async (req, res) => {
   try {
     const { wp_user_id } = req.params;
@@ -297,7 +316,6 @@ app.get("/usage/:wp_user_id", async (req, res) => {
 // - ak user ešte neexistuje v `users`, vytvor ho
 // - vytvor/aktualizuj subscriptions
 // - ak začína nové billing obdobie => nastav credit_balances.credits_remaining = monthly_credit_limit
-//
 app.post("/webhook/subscription-update", async (req, res) => {
   try {
     const {
