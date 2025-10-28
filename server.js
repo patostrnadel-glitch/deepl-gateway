@@ -9,7 +9,7 @@ import elevenRoutes from "./routes/elevenlabs.js";
 import geminiRoutes from "./routes/gemini.js";
 import heygenRoutes from "./routes/heygen.js";
 import photoAvatarRoutes from "./routes/photoAvatar.js";
-import heygentexttoVideoRoutes from "./routes/heygenavatar.js";
+import heygenAvatarRoutes from "./routes/heygenavatar.js";
 
 dotenv.config();
 
