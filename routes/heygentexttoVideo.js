@@ -1,17 +1,19 @@
-// routes/heygentexttoVideo.js
+// routes/heygenavatar.js
 import express from "express";
 import axios from "axios";
 
 const router = express.Router();
 
 /**
- * POST /heygentexttovideo/generate
+ * POST /heygenavatar/generate
  *
  * Očakáva v req.body:
  * {
- *   prompt:   "čo chceme vo videu",
- *   ratio:    "16:9" | "1:1" | "4:3" | "9:16",
- *   duration: 5 | 15 | 30 | 60 (sekundy)
+ *   prompt:   "čo má avatar povedať",
+ *   avatar:   "Daisy" | "Marcus" | ... (ID avatara v HeyGene),
+ *   voice:    "sk_female" | "en_us_female" | ... (ID hlasu),
+ *   aspect:   "16:9" | "1:1" | "9:16",
+ *   duration: 5 | 15 | 30 | 60  (sekundy)
  * }
  *
  * Vráti:
@@ -21,24 +23,40 @@ const router = express.Router();
  *   status: "pending" | "in_progress" | ...
  * }
  */
-router.post("/heygentexttovideo/generate", async (req, res) => {
+router.post("/heygenavatar/generate", async (req, res) => {
   try {
-    const { prompt, ratio, duration } = req.body || {};
+    const { prompt, avatar, voice, aspect, duration } = req.body || {};
 
-    // Validácia vstupov
+    // --- 1. Validácia vstupov
     if (!prompt) {
       return res.status(400).json({
         ok: false,
         error: "MISSING_PROMPT",
-        details: "Field 'prompt' is required."
+        details: "Field 'prompt' (text ktorý má avatar povedať) je povinný."
       });
     }
 
-    if (!ratio) {
+    if (!avatar) {
       return res.status(400).json({
         ok: false,
-        error: "MISSING_RATIO",
-        details: "Field 'ratio' is required (e.g. '16:9', '1:1')."
+        error: "MISSING_AVATAR",
+        details: "Field 'avatar' (id avatara) je povinný."
+      });
+    }
+
+    if (!voice) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_VOICE",
+        details: "Field 'voice' (hlas/jazyk) je povinný."
+      });
+    }
+
+    if (!aspect) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_ASPECT",
+        details: "Field 'aspect' (napr. '16:9', '1:1', '9:16') je povinný."
       });
     }
 
@@ -46,7 +64,7 @@ router.post("/heygentexttovideo/generate", async (req, res) => {
       return res.status(400).json({
         ok: false,
         error: "MISSING_DURATION",
-        details: "Field 'duration' is required (e.g. 5, 15, 30, 60)."
+        details: "Field 'duration' (5/15/30/60) je povinný."
       });
     }
 
@@ -59,40 +77,46 @@ router.post("/heygentexttovideo/generate", async (req, res) => {
       });
     }
 
-    // 🔎 Log pre debug do Render logov
-    console.log("→ heygentexttovideo/generate INPUT", {
+    // --- 2. Log pre Render, aby si videl čo posielame
+    console.log("→ heygenavatar/generate INPUT", {
       prompt,
-      ratio,
+      avatar,
+      voice,
+      aspect,
       duration
     });
 
     /**
-     * PRÍPRAVA PAYLOADU PRE HEYGEN
+     * --- 3. PAYLOAD PRE HEYGEN ---
      *
-     * Teraz posielame polia takto:
-     *  - prompt      → text scény / opis
-     *  - ratio       → "16:9", "1:1", "9:16", ...
-     *  - duration    → integer v sekundách
+     * Toto je KRITICKÉ:
+     * HeyGen pri avatar videách neočakáva len 'prompt',
+     * ale štruktúru typu "video_inputs".
      *
-     * Ak HeyGen API očakáva iné keys (napr. prompt_text / aspect_ratio / duration_seconds),
-     * tu je presne to miesto, kde to vieš zmeniť.
+     * Toto je to, čo ti doposiaľ chýbalo a kvôli čomu vrátil:
+     *   "video_inputs is invalid: Field required"
      *
-     * Ja ti teraz urobím payload v "čistej" forme (prompt/ratio/duration),
-     * lebo tak sme to nastavili aj vo WP snippete.
+     * V praxi tieto polia môžu mať iné presné názvy podľa tvojho plánu,
+     * ale pattern je toto: zoznam scén, kde scéna povie text.
+     *
+     * Tu dávame minimálnu povinnú štruktúru, ktorú HeyGen typicky chce
+     * pre "avatar hovorí text".
      */
-
     const heygenPayload = {
-      prompt: prompt,
-      ratio: ratio,
-      duration: Number(duration),
-      sound: false,
-      resolution: "1080p"
+      video_inputs: [
+        {
+          character: {
+            avatar_id: avatar,      // napr. "Daisy"
+            voice_id: voice         // napr. "sk_female"
+          },
+          input_text: prompt        // text ktorý má avatar povedať
+        }
+      ],
+      aspect_ratio: aspect || "16:9",
+      duration_seconds: Number(duration) || 15
     };
 
-    // 🔥 volanie HeyGen API
-    // Poznámka: endpoint si uprav podľa toho, čo máš v ich dokumentácii/účte.
-    // Niektoré účty používajú /v2/video/generate, iné /v1/video/generate.
-    // Ty si mal /v2/video/generate, tak to ponechám.
+    // --- 4. Zavoláme HeyGen API
     let heygenResp;
     try {
       heygenResp = await axios.post(
@@ -117,8 +141,13 @@ router.post("/heygentexttovideo/generate", async (req, res) => {
 
     const data = heygenResp.data;
 
-    // 🎯 extrakcia jobId a statusu z odpovede
+    /**
+     * --- 5. Vytiahneme jobId/status z odpovede HeyGenu
+     * Niektoré účty ho vrátia ako data.id,
+     * niektoré ako data.video_id, niektoré ako id.
+     */
     const jobId =
+      data?.data?.video_id ||
       data?.data?.id ||
       data?.id ||
       data?.job_id ||
@@ -138,7 +167,7 @@ router.post("/heygentexttovideo/generate", async (req, res) => {
       });
     }
 
-    console.log("✔ heygentexttovideo/generate OK ->", {
+    console.log("✔ heygenavatar/generate OK ->", {
       jobId,
       status: statusVal
     });
@@ -151,7 +180,7 @@ router.post("/heygentexttovideo/generate", async (req, res) => {
 
   } catch (err) {
     console.error(
-      "ERR /heygentexttovideo/generate (outer):",
+      "ERR /heygenavatar/generate (outer):",
       err?.response?.data || err.message
     );
 
@@ -163,8 +192,9 @@ router.post("/heygentexttovideo/generate", async (req, res) => {
   }
 });
 
+
 /**
- * GET /heygentexttovideo/status/:jobId
+ * GET /heygenavatar/status/:jobId
  *
  * Pollovanie stavu jobu.
  *
@@ -174,14 +204,14 @@ router.post("/heygentexttovideo/generate", async (req, res) => {
  *   videoUrl: "https://....mp4" | null
  * }
  */
-router.get("/heygentexttovideo/status/:jobId", async (req, res) => {
+router.get("/heygenavatar/status/:jobId", async (req, res) => {
   try {
     const { jobId } = req.params;
 
     if (!jobId) {
       return res.status(400).json({
         error: "MISSING_JOB_ID",
-        details: "Provide jobId in URL /heygentexttovideo/status/:jobId"
+        details: "Provide jobId in URL /heygenavatar/status/:jobId"
       });
     }
 
@@ -224,7 +254,7 @@ router.get("/heygentexttovideo/status/:jobId", async (req, res) => {
       data?.video_url ||
       null;
 
-    console.log("↺ heygentexttovideo/status ->", {
+    console.log("↺ heygenavatar/status ->", {
       jobId,
       status: statusVal,
       hasVideoUrl: !!videoUrl
@@ -237,7 +267,7 @@ router.get("/heygentexttovideo/status/:jobId", async (req, res) => {
 
   } catch (err) {
     console.error(
-      "ERR /heygentexttovideo/status/:jobId (outer):",
+      "ERR /heygenavatar/status/:jobId (outer):",
       err?.response?.data || err.message
     );
 
