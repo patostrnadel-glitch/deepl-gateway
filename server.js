@@ -8,14 +8,14 @@ import deeplRoutes from "./routes/deepl.js";
 import elevenRoutes from "./routes/elevenlabs.js";
 import geminiRoutes from "./routes/gemini.js";
 import heygenRoutes from "./routes/heygen.js";
-import photoAvatarRoutes from "./routes/photoAvatar.js"; // musí sedieť s názvom súboru
+import photoAvatarRoutes from "./routes/photoAvatar.js";
+// NOVÉ: náš nový HeyGen text->video router
+import heygenVideoRoutes from "./routes/heygenVideo.js"; // <- tento súbor práve vytvárame
 
-// Načítaj .env premenné (lokálne). Na Renderi to číta z Environment Variables.
+// Načítaj .env premenné
 dotenv.config();
 
 // ====== DB PRIPOJENIE =====================================
-// Hodnoty nebudú natvrdo v kóde. Budú v env premenných:
-// DB_HOST, DB_USER, DB_PASS, DB_NAME
 const dbConfig = {
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -40,7 +40,7 @@ const app = express();
 // bezpečnostné hlavičky
 app.use(helmet());
 
-// CORS – povolíme tvoj web ai.developerska.eu
+// CORS – povolíme tvoj web (WordPress frontend)
 app.use(
   cors({
     origin: "https://www.tvorai.cz",
@@ -53,7 +53,10 @@ app.use(
 app.options("*", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "https://www.tvorai.cz");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
   return res.sendStatus(200);
 });
 
@@ -79,7 +82,7 @@ async function getUserByWpId(wp_user_id) {
 
 // HELPER: načítaj aktívne predplatné a kredity
 async function getActiveSubscriptionAndBalance(user_id) {
-  // zistíme aktívne predplatné
+  // aktívne predplatné
   const [subs] = await db.execute(
     `SELECT * FROM subscriptions
      WHERE user_id = ? AND active = 1
@@ -94,7 +97,7 @@ async function getActiveSubscriptionAndBalance(user_id) {
 
   const subscription = subs[0];
 
-  // zistíme zostatok kreditov
+  // zostatok kreditov
   const [balances] = await db.execute(
     `SELECT * FROM credit_balances
      WHERE user_id = ?
@@ -111,15 +114,14 @@ async function getActiveSubscriptionAndBalance(user_id) {
 // ===========================================================
 // 1) /consume  -> použitie AI funkcie, odpočíta kredity a zaloguje
 //
-// request body očakáva:
+// request body:
 // {
 //   "wp_user_id": 123,
 //   "feature_type": "translate_text" | "gemini_chat" | "heygen_video" | ...
-//   "metadata": {... optional info o požiadavke }
+//   "metadata": {... optional }
 // }
 //
-// Dôležité: už NEberieme cenu z frontendu. Cenu určuje PRICING tu na backende.
-// ===========================================================
+// PRICING definuje cenu v kreditoch za jednu operáciu.
 app.post("/consume", async (req, res) => {
   try {
     const { wp_user_id, feature_type, metadata } = req.body;
@@ -132,15 +134,14 @@ app.post("/consume", async (req, res) => {
       });
     }
 
-    // 💸 CENNÍK ZA FUNKCIE (TU SI NASTAV SVOJE CENY)
-    // Každý typ akcie = koľko kreditov stojí jedno použitie.
+    // 💸 CENNÍK ZA FUNKCIE
     const PRICING = {
-      translate_text: 10,   // preklad textu (DeepL klon)
-      gemini_chat: 5,      // AI chat
-      heygen_video: 200,   // video avatar generácia
-      voice_tts: 2,        // text -> hlas
-      photo_avatar: 50,    // AI fotka/avatar
-      test_feature: 10     // tvoj pôvodný test
+      translate_text: 10, // DeepL klon
+      gemini_chat: 5, // AI chat
+      heygen_video: 200, // video avatar generácia
+      voice_tts: 2, // text -> hlas
+      photo_avatar: 50, // AI fotka/avatar
+      test_feature: 10 // test
     };
 
     // nájdeme cenu
@@ -181,7 +182,7 @@ app.post("/consume", async (req, res) => {
     try {
       await connection.beginTransaction();
 
-      // znovu načítaj balance FOR UPDATE (lock)
+      // načítaj balance FOR UPDATE
       const [balRows] = await connection.execute(
         "SELECT * FROM credit_balances WHERE id = ? FOR UPDATE",
         [balance.id]
@@ -224,7 +225,6 @@ app.post("/consume", async (req, res) => {
       await connection.commit();
       connection.release();
 
-      // vraciame, aby frontend vedel pokračovať (napr. zavolať samotný preklad)
       return res.json({
         ok: true,
         credits_remaining: newBalance
@@ -236,7 +236,6 @@ app.post("/consume", async (req, res) => {
       return res.status(500).json({ error: "TX_FAILED", detail: err.message });
     }
   } catch (err) {
-    // sem padajú chyby ako "nedokážem sa pripojiť na DB", "access denied", atď.
     console.error("consume error", err.message, err.stack);
     return res
       .status(500)
@@ -246,15 +245,6 @@ app.post("/consume", async (req, res) => {
 
 // ===========================================================
 // 2) /usage/:wp_user_id  -> dashboard pre usera
-//
-// vráti:
-// {
-//   plan_id: "...",                // ID plánu z subscriptions
-//   credits_remaining: 39000,      // zostatok kreditov
-//   monthly_credit_limit: 40000,   // mesačný balík
-//   cycle_end: "2025-11-26 ...",   // dokedy platí toto obdobie
-//   recent_usage: [ { timestamp, feature_type, credits_spent }, ... ]
-// }
 app.get("/usage/:wp_user_id", async (req, res) => {
   try {
     const { wp_user_id } = req.params;
@@ -272,7 +262,7 @@ app.get("/usage/:wp_user_id", async (req, res) => {
       return res.status(404).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
     }
 
-    // načítame posledné použitia
+    // posledné použitia
     const [logs] = await db.execute(
       `SELECT timestamp, feature_type, credits_spent
        FROM usage_logs
@@ -299,23 +289,6 @@ app.get("/usage/:wp_user_id", async (req, res) => {
 
 // ===========================================================
 // 3) /webhook/subscription-update
-//
-// Toto zavolá WordPress/MemberPress, keď niekto kúpi alebo zmení plán.
-// Očakávame body:
-// {
-//   "wp_user_id": 123,
-//   "email": "user@example.com",
-//   "plan_id": "pro",
-//   "monthly_credit_limit": 40000,
-//   "cycle_start": "2025-10-26 10:00:00",
-//   "cycle_end": "2025-11-26 10:00:00",
-//   "active": true
-// }
-//
-// Logika:
-// - ak user ešte neexistuje v `users`, vytvor ho
-// - vytvor/aktualizuj subscriptions
-// - ak začína nové billing obdobie => nastav credit_balances.credits_remaining = monthly_credit_limit
 app.post("/webhook/subscription-update", async (req, res) => {
   try {
     const {
@@ -359,7 +332,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
       );
       user = rows[0];
     } else {
-      // user existuje -> môžeš prípadne aktualizovať email, ak chceš
+      // update email ak sa zmenil
       if (email && email !== user.email) {
         await db.execute("UPDATE users SET email = ? WHERE id = ?", [
           email,
@@ -368,7 +341,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
       }
     }
 
-    // 2. zapíš subscription
+    // 2. zapíš / aktualizuj subscription
     await db.execute(
       `INSERT INTO subscriptions
         (user_id, plan_id, monthly_credit_limit, cycle_start, cycle_end, active)
@@ -389,7 +362,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
       ]
     );
 
-    // 3. nastav / obnov credit_balances pre toto nové obdobie
+    // 3. nastav/obnov credit_balances
     await db.execute(
       `INSERT INTO credit_balances
         (user_id, cycle_start, credits_remaining, updated_at)
@@ -411,14 +384,17 @@ app.post("/webhook/subscription-update", async (req, res) => {
 });
 
 // ===========================================================
-// API routy na tvoje AI služby (to čo si mal)
+// API routy na tvoje AI služby
 app.use("/", deeplRoutes);
 app.use("/", elevenRoutes);
 app.use("/", geminiRoutes);
 app.use("/", heygenRoutes);
 app.use("/", photoAvatarRoutes);
 
-// štart
+// NOVÉ: registrácia nášho HeyGen text->video routera
+app.use("/", heygenVideoRoutes);
+
+// štart servera po initDB
 initDB()
   .then(() => {
     app.listen(PORT, () => {
