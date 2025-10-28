@@ -7,8 +7,9 @@ import dotenv from "dotenv";
 import deeplRoutes from "./routes/deepl.js";
 import elevenRoutes from "./routes/elevenlabs.js";
 import geminiRoutes from "./routes/gemini.js";
-import heygenRoutes from "./routes/heygen.js";
+import heygenRoutes from "./routes/heygen.js";              // ak toto je niečo iné (napr. starší endpoint), môže ostať
 import photoAvatarRoutes from "./routes/photoAvatar.js";
+// náš nový avatar video endpoint
 import heygenAvatarRoutes from "./routes/heygenavatar.js";
 
 dotenv.config();
@@ -38,7 +39,7 @@ const app = express();
 // bezpečnostné hlavičky
 app.use(helmet());
 
-// CORS – povolíme tvoj web (frontend vo WP)
+// CORS – dovoľ náš WordPress frontend
 app.use(
   cors({
     origin: "https://www.tvorai.cz",
@@ -62,6 +63,7 @@ app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 8080;
 
+// basic healthcheck
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
@@ -85,7 +87,10 @@ async function getActiveSubscriptionAndBalance(user_id) {
     [user_id]
   );
 
-  if (!subs.length) return { subscription: null, balance: null };
+  if (!subs.length) {
+    return { subscription: null, balance: null };
+  }
+
   const subscription = subs[0];
 
   const [balances] = await db.execute(
@@ -120,7 +125,7 @@ app.post("/consume", async (req, res) => {
       });
     }
 
-    // Dynamický pricing pre heygen_video podľa dĺžky videa
+    // --- Pricing pre heygen_video je dynamický podľa trvania
     function getHeygenVideoCost(durationRaw) {
       const dur = parseInt(durationRaw, 10);
 
@@ -129,7 +134,7 @@ app.post("/consume", async (req, res) => {
       if (dur === 30) return 60;
       if (dur === 60) return 100;
 
-      // fallback ak príde niečo mimo náš zoznam
+      // fallback ak by prišlo niečo mimo nášho výberu
       return 30;
     }
 
@@ -140,13 +145,13 @@ app.post("/consume", async (req, res) => {
       voice_tts: 2,
       photo_avatar: 50,
       test_feature: 10,
-      // heygen_video sa rieši samostatne
+      // heygen_video sa rieši separátne
     };
 
     let estimated_cost;
 
     if (feature_type === "heygen_video") {
-      // WordPress nám posiela duration v sekundách v metadata.duration
+      // WP nám posiela "duration" v sekundách v metadata.duration
       estimated_cost = getHeygenVideoCost(metadata.duration);
     } else {
       estimated_cost = BASE_PRICING[feature_type];
@@ -160,7 +165,7 @@ app.post("/consume", async (req, res) => {
       });
     }
 
-    // --- nájdi usera podľa WP ID
+    // --- nájdi usera podľa WP user_id
     const user = await getUserByWpId(wp_user_id);
     if (!user) {
       return res.status(400).json({
@@ -169,7 +174,7 @@ app.post("/consume", async (req, res) => {
       });
     }
 
-    // --- kreditový zostatok
+    // --- zisti subscription a credits
     const { subscription, balance } = await getActiveSubscriptionAndBalance(
       user.id
     );
@@ -196,12 +201,12 @@ app.post("/consume", async (req, res) => {
       });
     }
 
-    // --- transakcia (transaction) na odrátanie kreditov a log použitia
+    // --- transakcia v DB (odrátaj kredity + zaloguj použitie)
     const connection = await db.getConnection();
     try {
       await connection.beginTransaction();
 
-      // lock current balance row
+      // lock row
       const [balRows] = await connection.execute(
         "SELECT * FROM credit_balances WHERE id = ? FOR UPDATE",
         [balance.id]
@@ -231,13 +236,13 @@ app.post("/consume", async (req, res) => {
       const newBalance =
         currentBalance.credits_remaining - Number(estimated_cost);
 
-      // update balance
+      // update credits
       await connection.execute(
         "UPDATE credit_balances SET credits_remaining = ?, updated_at = NOW() WHERE id = ?",
         [newBalance, currentBalance.id]
       );
 
-      // log usage
+      // insert usage log
       await connection.execute(
         "INSERT INTO usage_logs (user_id, feature_type, credits_spent, metadata) VALUES (?, ?, ?, ?)",
         [
@@ -251,7 +256,6 @@ app.post("/consume", async (req, res) => {
       await connection.commit();
       connection.release();
 
-      // success
       return res.json({
         ok: true,
         credits_remaining: newBalance,
@@ -282,15 +286,19 @@ app.post("/consume", async (req, res) => {
 app.get("/usage/:wp_user_id", async (req, res) => {
   try {
     const { wp_user_id } = req.params;
+
     const user = await getUserByWpId(wp_user_id);
-    if (!user)
+    if (!user) {
       return res.status(400).json({ error: "USER_NOT_FOUND" });
+    }
 
     const { subscription, balance } = await getActiveSubscriptionAndBalance(
       user.id
     );
-    if (!subscription)
+
+    if (!subscription) {
       return res.status(404).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
+    }
 
     const [logs] = await db.execute(
       `SELECT timestamp, feature_type, credits_spent
@@ -345,7 +353,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
       });
     }
 
-    // ensure user exists / sync email
+    // 1. zaisti usera / sync emailu
     let user = await getUserByWpId(wp_user_id);
     if (!user) {
       const [result] = await db.execute(
@@ -365,7 +373,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
       ]);
     }
 
-    // upsert subscription
+    // 2. upsert subscription
     await db.execute(
       `INSERT INTO subscriptions
         (user_id, plan_id, monthly_credit_limit, cycle_start, cycle_end, active)
@@ -386,7 +394,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
       ]
     );
 
-    // upsert credit balance
+    // 3. upsert credit_balances
     await db.execute(
       `INSERT INTO credit_balances
         (user_id, cycle_start, credits_remaining, updated_at)
@@ -415,7 +423,7 @@ app.use("/", elevenRoutes);
 app.use("/", geminiRoutes);
 app.use("/", heygenRoutes);
 app.use("/", photoAvatarRoutes);
-app.use("/", heygentexttoVideoRoutes);
+app.use("/", heygenAvatarRoutes);
 
 // ===========================================================
 // Štart servera
@@ -429,4 +437,3 @@ initDB()
     console.error("DB INIT FAILED", err.message, err.stack);
     process.exit(1);
   });
-
