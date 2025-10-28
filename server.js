@@ -135,7 +135,7 @@ app.post("/consume", async (req, res) => {
     // 💸 CENNÍK ZA FUNKCIE (TU SI NASTAV SVOJE CENY)
     // Každý typ akcie = koľko kreditov stojí jedno použitie.
     const PRICING = {
-      translate_text: 5,   // preklad textu (DeepL klon)
+      translate_text: 90000,   // preklad textu (DeepL klon)
       gemini_chat: 5,      // AI chat
       heygen_video: 200,   // video avatar generácia
       voice_tts: 2,        // text -> hlas
