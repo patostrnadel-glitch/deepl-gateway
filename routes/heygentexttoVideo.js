@@ -9,9 +9,9 @@ const router = express.Router();
  *
  * Očakáva v req.body:
  * {
- *   prompt: "čo chceme vo videu",
- *   aspect: "16:9" | "1:1" | "4:3" | "9:16",
- *   duration: 5 | 15 | 30 | 60
+ *   prompt:   "čo chceme vo videu",
+ *   ratio:    "16:9" | "1:1" | "4:3" | "9:16",
+ *   duration: 5 | 15 | 30 | 60 (sekundy)
  * }
  *
  * Vráti:
@@ -23,13 +23,30 @@ const router = express.Router();
  */
 router.post("/heygentexttovideo/generate", async (req, res) => {
   try {
-    const { prompt, aspect, duration } = req.body || {};
+    const { prompt, ratio, duration } = req.body || {};
 
+    // Validácia vstupov
     if (!prompt) {
       return res.status(400).json({
         ok: false,
         error: "MISSING_PROMPT",
         details: "Field 'prompt' is required."
+      });
+    }
+
+    if (!ratio) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_RATIO",
+        details: "Field 'ratio' is required (e.g. '16:9', '1:1')."
+      });
+    }
+
+    if (!duration) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_DURATION",
+        details: "Field 'duration' is required (e.g. 5, 15, 30, 60)."
       });
     }
 
@@ -42,40 +59,75 @@ router.post("/heygentexttovideo/generate", async (req, res) => {
       });
     }
 
-    // pripravíme payload pre HeyGen
-    // POZOR: toto je generické, HeyGen real payload sa môže volať inak,
-    // ale dodržíme náš interný kontrakt (prompt/aspect/duration)
-    const payload = {
-      prompt_text: prompt,
-      aspect_ratio: aspect || "16:9",
-      duration_seconds: duration ? Number(duration) : 15
+    // 🔎 Log pre debug do Render logov
+    console.log("→ heygentexttovideo/generate INPUT", {
+      prompt,
+      ratio,
+      duration
+    });
+
+    /**
+     * PRÍPRAVA PAYLOADU PRE HEYGEN
+     *
+     * Teraz posielame polia takto:
+     *  - prompt      → text scény / opis
+     *  - ratio       → "16:9", "1:1", "9:16", ...
+     *  - duration    → integer v sekundách
+     *
+     * Ak HeyGen API očakáva iné keys (napr. prompt_text / aspect_ratio / duration_seconds),
+     * tu je presne to miesto, kde to vieš zmeniť.
+     *
+     * Ja ti teraz urobím payload v "čistej" forme (prompt/ratio/duration),
+     * lebo tak sme to nastavili aj vo WP snippete.
+     */
+
+    const heygenPayload = {
+      prompt: prompt,
+      ratio: ratio,
+      duration: Number(duration),
+      sound: false,
+      resolution: "1080p"
     };
 
-    // voláme HeyGen API (endpoint musí sedieť s tvojím plánom; ak máš iný path, prispôsob)
-    const heygenResp = await axios.post(
-      "https://api.heygen.com/v2/video/generate",
-      payload,
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "X-Api-Key": process.env.HEYGEN_API_KEY
-        },
-        timeout: 60000
-      }
-    );
+    // 🔥 volanie HeyGen API
+    // Poznámka: endpoint si uprav podľa toho, čo máš v ich dokumentácii/účte.
+    // Niektoré účty používajú /v2/video/generate, iné /v1/video/generate.
+    // Ty si mal /v2/video/generate, tak to ponechám.
+    let heygenResp;
+    try {
+      heygenResp = await axios.post(
+        "https://api.heygen.com/v2/video/generate",
+        heygenPayload,
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Api-Key": process.env.HEYGEN_API_KEY
+          },
+          timeout: 60000
+        }
+      );
+    } catch (apiErr) {
+      console.error("HeyGen API request FAILED:", apiErr?.response?.data || apiErr.message);
+      return res.status(500).json({
+        ok: false,
+        error: "HEYGEN_GENERATE_FAILED",
+        details: apiErr?.response?.data || apiErr.message
+      });
+    }
 
     const data = heygenResp.data;
 
-    // HeyGen typicky vráti ID jobu, ktoré potom pollujeme
+    // 🎯 extrakcia jobId a statusu z odpovede
     const jobId =
       data?.data?.id ||
       data?.id ||
+      data?.job_id ||
       null;
 
     const statusVal =
       data?.data?.status ||
       data?.status ||
-      null;
+      "pending";
 
     if (!jobId) {
       console.error("HeyGen generate odpoveď bez jobId:", data);
@@ -86,7 +138,7 @@ router.post("/heygentexttovideo/generate", async (req, res) => {
       });
     }
 
-    console.log("HeyGen text2video generate ->", {
+    console.log("✔ heygentexttovideo/generate OK ->", {
       jobId,
       status: statusVal
     });
@@ -96,9 +148,10 @@ router.post("/heygentexttovideo/generate", async (req, res) => {
       jobId,
       status: statusVal || "pending"
     });
+
   } catch (err) {
     console.error(
-      "ERR /heygentexttovideo/generate:",
+      "ERR /heygentexttovideo/generate (outer):",
       err?.response?.data || err.message
     );
 
@@ -140,15 +193,24 @@ router.get("/heygentexttovideo/status/:jobId", async (req, res) => {
       });
     }
 
-    const statusResp = await axios.get(
-      `https://api.heygen.com/v2/video/status/${jobId}`,
-      {
-        headers: {
-          "X-Api-Key": process.env.HEYGEN_API_KEY
-        },
-        timeout: 30000
-      }
-    );
+    let statusResp;
+    try {
+      statusResp = await axios.get(
+        `https://api.heygen.com/v2/video/status/${jobId}`,
+        {
+          headers: {
+            "X-Api-Key": process.env.HEYGEN_API_KEY
+          },
+          timeout: 30000
+        }
+      );
+    } catch (apiErr) {
+      console.error("HeyGen status request FAILED:", apiErr?.response?.data || apiErr.message);
+      return res.status(500).json({
+        error: "HEYGEN_STATUS_FAILED",
+        details: apiErr?.response?.data || apiErr.message
+      });
+    }
 
     const data = statusResp.data;
 
@@ -162,7 +224,7 @@ router.get("/heygentexttovideo/status/:jobId", async (req, res) => {
       data?.video_url ||
       null;
 
-    console.log("HeyGen text2video status ->", {
+    console.log("↺ heygentexttovideo/status ->", {
       jobId,
       status: statusVal,
       hasVideoUrl: !!videoUrl
@@ -172,9 +234,10 @@ router.get("/heygentexttovideo/status/:jobId", async (req, res) => {
       status: statusVal,
       videoUrl: videoUrl || null
     });
+
   } catch (err) {
     console.error(
-      "ERR /heygentexttovideo/status/:jobId:",
+      "ERR /heygentexttovideo/status/:jobId (outer):",
       err?.response?.data || err.message
     );
 
