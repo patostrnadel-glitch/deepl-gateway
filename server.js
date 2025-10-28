@@ -43,7 +43,7 @@ app.use(helmet());
 // CORS – povolíme tvoj web ai.developerska.eu
 app.use(
   cors({
-    origin: "https://ai.developerska.eu",
+    origin: "https://www.tvorai.cz",
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"]
   })
@@ -51,7 +51,7 @@ app.use(
 
 // preflight handler pre všetky cesty
 app.options("*", (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "https://ai.developerska.eu");
+  res.setHeader("Access-Control-Allow-Origin", "https://www.tvorai.cz");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   return res.sendStatus(200);
