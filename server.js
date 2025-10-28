@@ -7,14 +7,12 @@ import dotenv from "dotenv";
 import deeplRoutes from "./routes/deepl.js";
 import elevenRoutes from "./routes/elevenlabs.js";
 import geminiRoutes from "./routes/gemini.js";
-import heygenRoutes from "./routes/heygen.js";              // ak toto je niečo iné (napr. starší endpoint), môže ostať
+import heygenRoutes from "./routes/heygen.js";
 import photoAvatarRoutes from "./routes/photoAvatar.js";
-// náš nový avatar video endpoint
 import heygenAvatarRoutes from "./routes/heygenavatar.js";
 
 dotenv.config();
 
-// ====== DB PRIPOJENIE =====================================
 const dbConfig = {
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -32,14 +30,11 @@ async function initDB() {
   });
   console.log("✅ DB pool ready");
 }
-// ===========================================================
 
 const app = express();
 
-// bezpečnostné hlavičky
 app.use(helmet());
 
-// CORS – dovoľ náš WordPress frontend
 app.use(
   cors({
     origin: "https://www.tvorai.cz",
@@ -48,7 +43,6 @@ app.use(
   })
 );
 
-// preflight handler
 app.options("*", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "https://www.tvorai.cz");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -63,13 +57,11 @@ app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 8080;
 
-// basic healthcheck
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-// ===========================================================
-// Helpery pre DB
+// Helpers
 async function getUserByWpId(wp_user_id) {
   const [rows] = await db.execute(
     "SELECT * FROM users WHERE wp_user_id = ? LIMIT 1",
@@ -87,10 +79,7 @@ async function getActiveSubscriptionAndBalance(user_id) {
     [user_id]
   );
 
-  if (!subs.length) {
-    return { subscription: null, balance: null };
-  }
-
+  if (!subs.length) return { subscription: null, balance: null };
   const subscription = subs[0];
 
   const [balances] = await db.execute(
@@ -105,8 +94,7 @@ async function getActiveSubscriptionAndBalance(user_id) {
   return { subscription, balance };
 }
 
-// ===========================================================
-// /consume – odpočíta kredity
+// /consume
 app.post("/consume", async (req, res) => {
   try {
     const { wp_user_id, feature_type, metadata = {} } = req.body;
@@ -125,33 +113,25 @@ app.post("/consume", async (req, res) => {
       });
     }
 
-    // --- Pricing pre heygen_video je dynamický podľa trvania
     function getHeygenVideoCost(durationRaw) {
       const dur = parseInt(durationRaw, 10);
-
-      if (dur === 5) return 20;
+      if (dur === 5)  return 20;
       if (dur === 15) return 30;
       if (dur === 30) return 60;
       if (dur === 60) return 100;
-
-      // fallback ak by prišlo niečo mimo nášho výberu
       return 30;
     }
 
-    // Základný cenník ostatných featur
     const BASE_PRICING = {
       translate_text: 10,
       gemini_chat: 5,
       voice_tts: 2,
       photo_avatar: 50,
       test_feature: 10,
-      // heygen_video sa rieši separátne
     };
 
     let estimated_cost;
-
     if (feature_type === "heygen_video") {
-      // WP nám posiela "duration" v sekundách v metadata.duration
       estimated_cost = getHeygenVideoCost(metadata.duration);
     } else {
       estimated_cost = BASE_PRICING[feature_type];
@@ -165,7 +145,6 @@ app.post("/consume", async (req, res) => {
       });
     }
 
-    // --- nájdi usera podľa WP user_id
     const user = await getUserByWpId(wp_user_id);
     if (!user) {
       return res.status(400).json({
@@ -174,7 +153,6 @@ app.post("/consume", async (req, res) => {
       });
     }
 
-    // --- zisti subscription a credits
     const { subscription, balance } = await getActiveSubscriptionAndBalance(
       user.id
     );
@@ -201,12 +179,10 @@ app.post("/consume", async (req, res) => {
       });
     }
 
-    // --- transakcia v DB (odrátaj kredity + zaloguj použitie)
     const connection = await db.getConnection();
     try {
       await connection.beginTransaction();
 
-      // lock row
       const [balRows] = await connection.execute(
         "SELECT * FROM credit_balances WHERE id = ? FOR UPDATE",
         [balance.id]
@@ -236,13 +212,11 @@ app.post("/consume", async (req, res) => {
       const newBalance =
         currentBalance.credits_remaining - Number(estimated_cost);
 
-      // update credits
       await connection.execute(
         "UPDATE credit_balances SET credits_remaining = ?, updated_at = NOW() WHERE id = ?",
         [newBalance, currentBalance.id]
       );
 
-      // insert usage log
       await connection.execute(
         "INSERT INTO usage_logs (user_id, feature_type, credits_spent, metadata) VALUES (?, ?, ?, ?)",
         [
@@ -281,12 +255,10 @@ app.post("/consume", async (req, res) => {
   }
 });
 
-// ===========================================================
-// /usage/:wp_user_id – zobraz kredity
+// /usage/:wp_user_id
 app.get("/usage/:wp_user_id", async (req, res) => {
   try {
     const { wp_user_id } = req.params;
-
     const user = await getUserByWpId(wp_user_id);
     if (!user) {
       return res.status(400).json({ error: "USER_NOT_FOUND" });
@@ -295,7 +267,6 @@ app.get("/usage/:wp_user_id", async (req, res) => {
     const { subscription, balance } = await getActiveSubscriptionAndBalance(
       user.id
     );
-
     if (!subscription) {
       return res.status(404).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
     }
@@ -325,7 +296,6 @@ app.get("/usage/:wp_user_id", async (req, res) => {
   }
 });
 
-// ===========================================================
 // webhook/subscription-update
 app.post("/webhook/subscription-update", async (req, res) => {
   try {
@@ -353,7 +323,6 @@ app.post("/webhook/subscription-update", async (req, res) => {
       });
     }
 
-    // 1. zaisti usera / sync emailu
     let user = await getUserByWpId(wp_user_id);
     if (!user) {
       const [result] = await db.execute(
@@ -373,7 +342,6 @@ app.post("/webhook/subscription-update", async (req, res) => {
       ]);
     }
 
-    // 2. upsert subscription
     await db.execute(
       `INSERT INTO subscriptions
         (user_id, plan_id, monthly_credit_limit, cycle_start, cycle_end, active)
@@ -394,7 +362,6 @@ app.post("/webhook/subscription-update", async (req, res) => {
       ]
     );
 
-    // 3. upsert credit_balances
     await db.execute(
       `INSERT INTO credit_balances
         (user_id, cycle_start, credits_remaining, updated_at)
@@ -416,17 +383,18 @@ app.post("/webhook/subscription-update", async (req, res) => {
   }
 });
 
-// ===========================================================
-// API ROUTES
+// ========= ROUTES z ./routes/*.js =========
 app.use("/", deeplRoutes);
 app.use("/", elevenRoutes);
 app.use("/", geminiRoutes);
 app.use("/", heygenRoutes);
 app.use("/", photoAvatarRoutes);
-app.use("/", heygenAvatarRoutes);
+app.use("/", heygenAvatarRoutes); // <- náš nový avatar video route
 
-// ===========================================================
-// Štart servera
+// ========= Štart servera =========
+import dotenv from "dotenv";
+dotenv.config();
+
 initDB()
   .then(() => {
     app.listen(PORT, () => {
