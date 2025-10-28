@@ -1,140 +1,155 @@
-(function () {
-  if (typeof TvorAIHeygenConfig === "undefined") {
-    console.error("TvorAIHeygenConfig nie je definovaný.");
-    return;
-  }
+// routes/heygentexttoVideo.js
+import express from "express";
+import axios from "axios";
 
-  const API_BASE = TvorAIHeygenConfig.apiBase; // Render backend (Node)
-  const AJAX_URL = TvorAIHeygenConfig.ajaxUrl; // admin-ajax.php
-  const POLL_INTERVAL = TvorAIHeygenConfig.pollInterval || 3000;
+const router = express.Router();
 
-  const btn = document.getElementById("tvorai_generate_btn");
-  const statusBox = document.getElementById("tvorai_status");
-  const resultBox = document.getElementById("tvorai_result");
+// POST /heygen-video/generate
+router.post("/heygen-video/generate", async (req, res) => {
+  try {
+    const { scriptText, avatarId, voiceId, testMode } = req.body || {};
 
-  if (!btn || !statusBox || !resultBox) {
-    return;
-  }
+    if (!scriptText || !avatarId || !voiceId) {
+      return res.status(400).json({
+        error: "MISSING_FIELDS",
+        details:
+          "Required fields: scriptText, avatarId, voiceId. Optional: testMode(boolean)."
+      });
+    }
 
-  async function startBackendFlow() {
-    const scriptText = document.getElementById("tvorai_script").value || "";
-    const avatarId   = document.getElementById("tvorai_avatar").value || "";
-    const voiceId    = document.getElementById("tvorai_voice").value || "";
+    if (!process.env.HEYGEN_API_KEY) {
+      console.error("HEYGEN_API_KEY nie je nastavený v env!");
+      return res.status(500).json({
+        error: "SERVER_CONFIG",
+        details: "HEYGEN_API_KEY is missing in environment."
+      });
+    }
 
-    const formData = new FormData();
-    formData.append("action", "lyra_consume_and_generate_video");
-    formData.append("scriptText", scriptText);
-    formData.append("avatarId", avatarId);
-    formData.append("voiceId", voiceId);
-
-    const res = await fetch(AJAX_URL, {
-        method: "POST",
-        body: formData
-    });
-
-    const json = await res.json();
-    return json;
-  }
-
-  async function pollStatus(jobId) {
-    return new Promise((resolve, reject) => {
-      let timerId = null;
-
-      async function check() {
-        try {
-          const res = await fetch(
-            API_BASE + "/heygen-video/status/" + encodeURIComponent(jobId),
-            { method: "GET" }
-          );
-          const json = await res.json();
-
-          statusBox.textContent = "Stav renderu: " + json.status + " ...";
-
-          if (json.status === "completed" && json.videoUrl) {
-            clearInterval(timerId);
-            resolve(json);
-            return;
+    const payload = {
+      video_inputs: [
+        {
+          character: {
+            type: "avatar",
+            avatar_id: avatarId,
+            avatar_style: "normal"
+          },
+          voice: {
+            type: "text",
+            input_text: scriptText,
+            voice_id: voiceId
           }
-
-          if (json.status === "failed") {
-            clearInterval(timerId);
-            reject(new Error("Render zlyhal."));
-            return;
-          }
-
-        } catch (err) {
-          clearInterval(timerId);
-          reject(err);
-          return;
         }
+      ],
+      test: typeof testMode === "boolean" ? testMode : true
+    };
+
+    const heygenResp = await axios.post(
+      "https://api.heygen.com/v2/video/generate",
+      payload,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Api-Key": process.env.HEYGEN_API_KEY
+        },
+        timeout: 60000
       }
+    );
 
-      check();
-      timerId = setInterval(check, POLL_INTERVAL);
+    const data = heygenResp.data;
+
+    const jobId =
+      data?.data?.id ??
+      data?.id ??
+      null;
+
+    const statusVal =
+      data?.data?.status ??
+      data?.status ??
+      null;
+
+    console.log("HeyGen generate ->", { jobId, status: statusVal });
+
+    return res.json({
+      ok: true,
+      jobId,
+      status: statusVal
+    });
+  } catch (err) {
+    console.error(
+      "ERR /heygen-video/generate:",
+      err?.response?.data || err.message
+    );
+
+    return res.status(500).json({
+      error: "HEYGEN_GENERATE_FAILED",
+      details: err?.response?.data || err.message
     });
   }
+});
 
-  async function handleGenerateClick() {
-    resultBox.innerHTML = "";
-    statusBox.textContent = "Overujem kredity a spúšťam render...";
+// GET /heygen-video/status/:jobId
+router.get("/heygen-video/status/:jobId", async (req, res) => {
+  try {
+    const { jobId } = req.params;
 
-    // 1. WP → /consume → /heygen-video/generate
-    let flowResp;
-    try {
-      flowResp = await startBackendFlow();
-    } catch (err) {
-      console.error("AJAX flow error", err);
-      statusBox.textContent = "Chyba pri vytváraní videa.";
-      return;
-    }
-
-    if (!flowResp.ok) {
-        console.warn("Flow response:", flowResp);
-
-        if (flowResp.error === "NOT_LOGGED_IN") {
-            statusBox.textContent = "Musíš byť prihlásený.";
-        } else if (flowResp.error === "NO_ACTIVE_SUBSCRIPTION") {
-            statusBox.textContent = "Nemáš aktívne predplatné.";
-        } else if (flowResp.error === "INSUFFICIENT_CREDITS") {
-            statusBox.textContent = "Nedostatok kreditov.";
-        } else {
-            statusBox.textContent = "Nedá sa vygenerovať video (" + flowResp.error + ").";
-        }
-        return;
-    }
-
-    const jobId = flowResp.jobId;
     if (!jobId) {
-        statusBox.textContent = "Server nevrátil jobId.";
-        return;
+      return res.status(400).json({
+        error: "MISSING_JOB_ID",
+        details: "Provide jobId in URL /heygen-video/status/:jobId"
+      });
     }
 
-    statusBox.textContent = "Renderujem video... (" + jobId + ")";
-
-    // 2. poll status priamo na Node API
-    try {
-      const finalStatus = await pollStatus(jobId);
-
-      statusBox.textContent = "Hotovo 🚀";
-      resultBox.innerHTML =
-        '<video controls style="max-width:100%;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,0.2);" src="' +
-        finalStatus.videoUrl +
-        '"></video>';
-    } catch (err) {
-      console.error("poll error", err);
-      statusBox.textContent = "Video sa nepodarilo vyrenderovať.";
+    if (!process.env.HEYGEN_API_KEY) {
+      console.error("HEYGEN_API_KEY nie je nastavený v env!");
+      return res.status(500).json({
+        error: "SERVER_CONFIG",
+        details: "HEYGEN_API_KEY is missing in environment."
+      });
     }
-  }
 
-  btn.addEventListener("click", function () {
-    btn.disabled = true;
-    btn.style.opacity = "0.6";
-    btn.style.cursor = "not-allowed";
+    const statusResp = await axios.get(
+      `https://api.heygen.com/v2/video/status/${jobId}`,
+      {
+        headers: {
+          "X-Api-Key": process.env.HEYGEN_API_KEY
+        },
+        timeout: 30000
+      }
+    );
 
-    handleGenerateClick().finally(() => {
-      btn.disabled = false;
-      btn.style.opacity = "";
-      btn.style.cursor = "pointer";
+    const data = statusResp.data;
+
+    const statusVal =
+      data?.data?.status ??
+      data?.status ??
+      null;
+
+    const videoUrl =
+      data?.data?.video_url ??
+      data?.video_url ??
+      null;
+
+    console.log("HeyGen status ->", {
+      jobId,
+      status: statusVal,
+      hasVideoUrl: !!videoUrl
     });
-  });
-})();
+
+    return res.json({
+      status: statusVal,
+      videoUrl: videoUrl || null
+    });
+  } catch (err) {
+    console.error(
+      "ERR /heygen-video/status/:jobId:",
+      err?.response?.data || err.message
+    );
+
+    return res.status(500).json({
+      error: "HEYGEN_STATUS_FAILED",
+      details: err?.response?.data || err.message
+    });
+  }
+});
+
+export default router;
