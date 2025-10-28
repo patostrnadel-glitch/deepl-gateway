@@ -9,7 +9,6 @@ import elevenRoutes from "./routes/elevenlabs.js";
 import geminiRoutes from "./routes/gemini.js";
 import heygenRoutes from "./routes/heygen.js";
 import photoAvatarRoutes from "./routes/photoAvatar.js";
-// ➕ nový route súbor
 import heygentexttoVideoRoutes from "./routes/heygentexttoVideo.js";
 
 dotenv.config();
@@ -39,7 +38,7 @@ const app = express();
 // bezpečnostné hlavičky
 app.use(helmet());
 
-// CORS – povolíme tvoj web ai.developerska.eu
+// CORS – povolíme tvoj web (frontend vo WP)
 app.use(
   cors({
     origin: "https://www.tvorai.cz",
@@ -60,6 +59,7 @@ app.options("*", (req, res) => {
 });
 
 app.use(express.json({ limit: "1mb" }));
+
 const PORT = process.env.PORT || 8080;
 
 app.get("/health", (_req, res) => {
@@ -104,50 +104,104 @@ async function getActiveSubscriptionAndBalance(user_id) {
 // /consume – odpočíta kredity
 app.post("/consume", async (req, res) => {
   try {
-    const { wp_user_id, feature_type, metadata } = req.body;
+    const { wp_user_id, feature_type, metadata = {} } = req.body;
+
+    console.log("WP -> /consume payload:", {
+      wp_user_id,
+      feature_type,
+      metadata,
+    });
 
     if (!wp_user_id || !feature_type) {
       return res.status(400).json({
+        ok: false,
         error: "MISSING_FIELDS",
         details: "wp_user_id and feature_type are required",
       });
     }
 
-    const PRICING = {
+    // Dynamický pricing pre heygen_video podľa dĺžky videa
+    function getHeygenVideoCost(durationRaw) {
+      const dur = parseInt(durationRaw, 10);
+
+      if (dur === 5) return 20;
+      if (dur === 15) return 30;
+      if (dur === 30) return 60;
+      if (dur === 60) return 100;
+
+      // fallback ak príde niečo mimo náš zoznam
+      return 30;
+    }
+
+    // Základný cenník ostatných featur
+    const BASE_PRICING = {
       translate_text: 10,
       gemini_chat: 5,
-      heygen_video: 200,
       voice_tts: 2,
       photo_avatar: 50,
       test_feature: 10,
+      // heygen_video sa rieši samostatne
     };
 
-    const estimated_cost = PRICING[feature_type];
+    let estimated_cost;
+
+    if (feature_type === "heygen_video") {
+      // WordPress nám posiela duration v sekundách v metadata.duration
+      estimated_cost = getHeygenVideoCost(metadata.duration);
+    } else {
+      estimated_cost = BASE_PRICING[feature_type];
+    }
+
     if (typeof estimated_cost === "undefined") {
       return res.status(400).json({
+        ok: false,
         error: "UNKNOWN_FEATURE_TYPE",
         details: `No pricing rule for feature_type=${feature_type}`,
       });
     }
 
+    // --- nájdi usera podľa WP ID
     const user = await getUserByWpId(wp_user_id);
-    if (!user) return res.status(400).json({ error: "USER_NOT_FOUND" });
+    if (!user) {
+      return res.status(400).json({
+        ok: false,
+        error: "USER_NOT_FOUND",
+      });
+    }
 
+    // --- kreditový zostatok
     const { subscription, balance } = await getActiveSubscriptionAndBalance(
       user.id
     );
 
-    if (!subscription || !subscription.active)
-      return res.status(403).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
-    if (!balance)
-      return res.status(400).json({ error: "NO_BALANCE_RECORD" });
-    if (balance.credits_remaining < estimated_cost)
-      return res.status(402).json({ error: "INSUFFICIENT_CREDITS" });
+    if (!subscription || !subscription.active) {
+      return res.status(403).json({
+        ok: false,
+        error: "NO_ACTIVE_SUBSCRIPTION",
+      });
+    }
 
+    if (!balance) {
+      return res.status(400).json({
+        ok: false,
+        error: "NO_BALANCE_RECORD",
+      });
+    }
+
+    if (balance.credits_remaining < estimated_cost) {
+      return res.status(402).json({
+        ok: false,
+        error: "INSUFFICIENT_CREDITS",
+        credits_remaining: balance.credits_remaining,
+      });
+    }
+
+    // --- transakcia (transaction) na odrátanie kreditov a log použitia
     const connection = await db.getConnection();
     try {
       await connection.beginTransaction();
 
+      // lock current balance row
       const [balRows] = await connection.execute(
         "SELECT * FROM credit_balances WHERE id = ? FOR UPDATE",
         [balance.id]
@@ -156,24 +210,34 @@ app.post("/consume", async (req, res) => {
       if (!balRows.length) {
         await connection.rollback();
         connection.release();
-        return res.status(400).json({ error: "BALANCE_NOT_FOUND_AGAIN" });
+        return res.status(400).json({
+          ok: false,
+          error: "BALANCE_NOT_FOUND_AGAIN",
+        });
       }
 
       const currentBalance = balRows[0];
+
       if (currentBalance.credits_remaining < estimated_cost) {
         await connection.rollback();
         connection.release();
-        return res.status(402).json({ error: "INSUFFICIENT_CREDITS" });
+        return res.status(402).json({
+          ok: false,
+          error: "INSUFFICIENT_CREDITS",
+          credits_remaining: currentBalance.credits_remaining,
+        });
       }
 
       const newBalance =
         currentBalance.credits_remaining - Number(estimated_cost);
 
+      // update balance
       await connection.execute(
         "UPDATE credit_balances SET credits_remaining = ?, updated_at = NOW() WHERE id = ?",
         [newBalance, currentBalance.id]
       );
 
+      // log usage
       await connection.execute(
         "INSERT INTO usage_logs (user_id, feature_type, credits_spent, metadata) VALUES (?, ?, ?, ?)",
         [
@@ -187,18 +251,29 @@ app.post("/consume", async (req, res) => {
       await connection.commit();
       connection.release();
 
-      return res.json({ ok: true, credits_remaining: newBalance });
+      // success
+      return res.json({
+        ok: true,
+        credits_remaining: newBalance,
+        estimated_cost,
+      });
     } catch (err) {
       await connection.rollback();
       connection.release();
       console.error("TX ERROR", err.message, err.stack);
-      return res.status(500).json({ error: "TX_FAILED", detail: err.message });
+      return res.status(500).json({
+        ok: false,
+        error: "TX_FAILED",
+        detail: err.message,
+      });
     }
   } catch (err) {
     console.error("consume error", err.message, err.stack);
-    return res
-      .status(500)
-      .json({ error: "SERVER_ERROR", detail: err.message });
+    return res.status(500).json({
+      ok: false,
+      error: "SERVER_ERROR",
+      detail: err.message,
+    });
   }
 });
 
@@ -208,7 +283,8 @@ app.get("/usage/:wp_user_id", async (req, res) => {
   try {
     const { wp_user_id } = req.params;
     const user = await getUserByWpId(wp_user_id);
-    if (!user) return res.status(400).json({ error: "USER_NOT_FOUND" });
+    if (!user)
+      return res.status(400).json({ error: "USER_NOT_FOUND" });
 
     const { subscription, balance } = await getActiveSubscriptionAndBalance(
       user.id
@@ -234,9 +310,10 @@ app.get("/usage/:wp_user_id", async (req, res) => {
     });
   } catch (err) {
     console.error("usage error", err.message, err.stack);
-    return res
-      .status(500)
-      .json({ error: "SERVER_ERROR", detail: err.message });
+    return res.status(500).json({
+      error: "SERVER_ERROR",
+      detail: err.message,
+    });
   }
 });
 
@@ -254,7 +331,13 @@ app.post("/webhook/subscription-update", async (req, res) => {
       active,
     } = req.body;
 
-    if (!wp_user_id || !plan_id || !monthly_credit_limit || !cycle_start || !cycle_end) {
+    if (
+      !wp_user_id ||
+      !plan_id ||
+      !monthly_credit_limit ||
+      !cycle_start ||
+      !cycle_end
+    ) {
       return res.status(400).json({
         error: "MISSING_FIELDS",
         details:
@@ -262,6 +345,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
       });
     }
 
+    // ensure user exists / sync email
     let user = await getUserByWpId(wp_user_id);
     if (!user) {
       const [result] = await db.execute(
@@ -281,6 +365,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
       ]);
     }
 
+    // upsert subscription
     await db.execute(
       `INSERT INTO subscriptions
         (user_id, plan_id, monthly_credit_limit, cycle_start, cycle_end, active)
@@ -301,6 +386,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
       ]
     );
 
+    // upsert credit balance
     await db.execute(
       `INSERT INTO credit_balances
         (user_id, cycle_start, credits_remaining, updated_at)
@@ -315,9 +401,10 @@ app.post("/webhook/subscription-update", async (req, res) => {
     return res.json({ ok: true });
   } catch (err) {
     console.error("webhook error", err.message, err.stack);
-    return res
-      .status(500)
-      .json({ error: "SERVER_ERROR", detail: err.message });
+    return res.status(500).json({
+      error: "SERVER_ERROR",
+      detail: err.message,
+    });
   }
 });
 
@@ -328,7 +415,6 @@ app.use("/", elevenRoutes);
 app.use("/", geminiRoutes);
 app.use("/", heygenRoutes);
 app.use("/", photoAvatarRoutes);
-// ➕ nový text-to-video endpoint
 app.use("/", heygentexttoVideoRoutes);
 
 // ===========================================================
