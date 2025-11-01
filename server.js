@@ -8,7 +8,9 @@ import deeplRoutes from "./routes/deepl.js";
 import elevenRoutes from "./routes/elevenlabs.js";
 import geminiRoutes from "./routes/gemini.js";
 import heygenRoutes from "./routes/heygen.js";
-import photoAvatarRoutes from "./routes/photoAvatar.js"; // musí sedieť s názvom súboru
+import photoAvatarRoutes from "./routes/photoAvatar.js"; 
+import klingRoutes from "./routes/kling.js";
+
 
 // Načítaj .env premenné (lokálne). Na Renderi to číta z Environment Variables.
 dotenv.config();
@@ -140,7 +142,9 @@ app.post("/consume", async (req, res) => {
       heygen_video: 200,   // video avatar generácia
       voice_tts: 2,        // text -> hlas
       photo_avatar: 50,    // AI fotka/avatar
+      kling_video: 250,
       test_feature: 10     // tvoj pôvodný test
+      
     };
 
     // nájdeme cenu
@@ -417,6 +421,7 @@ app.use("/", elevenRoutes);
 app.use("/", geminiRoutes);
 app.use("/", heygenRoutes);
 app.use("/", photoAvatarRoutes);
+app.use("/", klingRoutes);
 
 // štart
 initDB()
