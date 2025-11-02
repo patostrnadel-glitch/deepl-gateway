@@ -15,8 +15,6 @@ import klingRoutes from "./routes/kling.js";
 dotenv.config();
 
 // ====== DB PRIPOJENIE =====================================
-// Hodnoty nebudú natvrdo v kóde. Budú v env premenných:
-// DB_HOST, DB_USER, DB_PASS, DB_NAME
 const dbConfig = {
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -50,7 +48,7 @@ app.use(
   })
 );
 
-// preflight handler pre všetky cesty
+// preflight handler
 app.options("*", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "https://www.tvorai.cz");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -59,7 +57,7 @@ app.options("*", (req, res) => {
 });
 
 // JSON body
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "10mb" })); // zväčšený limit pre obrázky
 
 const PORT = process.env.PORT || 8080;
 
@@ -69,7 +67,7 @@ app.get("/health", (_req, res) => {
 });
 
 // ===========================================================
-// HELPER: získa interný user z tabuľky `users` podľa wp_user_id
+// HELPERS
 async function getUserByWpId(wp_user_id) {
   const [rows] = await db.execute(
     "SELECT * FROM users WHERE wp_user_id = ? LIMIT 1",
@@ -78,9 +76,7 @@ async function getUserByWpId(wp_user_id) {
   return rows.length ? rows[0] : null;
 }
 
-// HELPER: načítaj aktívne predplatné a kredity
 async function getActiveSubscriptionAndBalance(user_id) {
-  // zistíme aktívne predplatné
   const [subs] = await db.execute(
     `SELECT * FROM subscriptions
      WHERE user_id = ? AND active = 1
@@ -95,7 +91,6 @@ async function getActiveSubscriptionAndBalance(user_id) {
 
   const subscription = subs[0];
 
-  // zistíme zostatok kreditov
   const [balances] = await db.execute(
     `SELECT * FROM credit_balances
      WHERE user_id = ?
@@ -105,41 +100,15 @@ async function getActiveSubscriptionAndBalance(user_id) {
   );
 
   const balance = balances.length ? balances[0] : null;
-
   return { subscription, balance };
 }
 
 // ===========================================================
-// 1) /consume  -> použitie AI funkcie, odpočíta kredity a zaloguje
-//
-// Request body očakáva:
-// {
-//   "wp_user_id": 123,
-//   "feature_type": "translate_text" | "gemini_chat" | "heygen_video" | "kling_video" | ...,
-//   "estimated_cost": 200,        // (voliteľné) konkrétna cena volania v kreditoch
-//   "metadata": {
-//       "duration": 5,           // napr. pri kling_video vieme 5s alebo 10s
-//       ...hocičo ďalšie
-//   }
-// }
-//
-// Ako rátame cenu (finalCost):
-// 1. Ak prišlo estimated_cost z WordPressu -> použijeme to (napr. 200 alebo 500)
-// 2. Inak, ak feature_type === "kling_video" a metadata.duration existuje:
-//        duration 5s  -> 200 kreditov
-//        duration 10s -> 500 kreditov
-// 3. Inak fallback: použijeme PRICING[feature_type]
-// ===========================================================
+// 1) /consume
 app.post("/consume", async (req, res) => {
   try {
-    const {
-      wp_user_id,
-      feature_type,
-      estimated_cost, // môže prísť z WordPressu (200 alebo 500)
-      metadata
-    } = req.body || {};
+    const { wp_user_id, feature_type, estimated_cost, metadata } = req.body || {};
 
-    // 0. validácia vstupu
     if (!wp_user_id || !feature_type) {
       return res.status(400).json({
         error: "MISSING_FIELDS",
@@ -147,30 +116,24 @@ app.post("/consume", async (req, res) => {
       });
     }
 
-    // 💸 CENNÍK ZA FUNKCIE (fallback ceny)
-    // Toto sú defaulty, použijú sa ak nemáme nič špecifické.
+    // 💸 CENNÍK
     const PRICING = {
-      translate_text: 10,   // preklad textu (DeepL klon)
-      gemini_chat: 5,       // AI chat
-      heygen_video: 200,    // video avatar generácia
-      voice_tts: 2,         // text -> hlas
-      photo_avatar: 50,     // AI fotka/avatar
-      kling_video: 250,     // fallback pre KLING
-      test_feature: 10      // test
+      translate_text: 10,
+      gemini_chat: 5,
+      heygen_video: 200,
+      voice_tts: 2,
+      photo_avatar: 50,
+      kling_video: 250,
+      kling_i2v: 300,   // 🆕 nový typ – Kling V2.1 image-to-video
+      test_feature: 10
     };
 
-    // === 1. vyrátaj finalCost ===
+    // === 1. vyrátaj cenu ===
     let finalCost;
 
-    // (A) Ak klient poslal explicitne estimated_cost (napr. WP snippet dá 200 alebo 500),
-    //     použijeme ho.
     if (typeof estimated_cost === "number" && !Number.isNaN(estimated_cost)) {
       finalCost = estimated_cost;
     } else {
-      // (B) Ak je to KLING video a máme metadata.duration,
-      //     urč cenu podľa dĺžky:
-      //     5s  -> 200 kreditov
-      //     10s -> 500 kreditov
       if (feature_type === "kling_video" && metadata && metadata.duration) {
         const d = Number(metadata.duration);
         if (d === 5) {
@@ -180,61 +143,46 @@ app.post("/consume", async (req, res) => {
         }
       }
 
-      // (C) Fallback: ak stále nemáme finalCost, použi PRICING[feature_type]
+      // fallback pre iné feature typy
       if (typeof finalCost === "undefined") {
         finalCost = PRICING[feature_type];
       }
     }
 
-    // Ak ani teraz nemáme cenu, nevieme účtovať
     if (typeof finalCost === "undefined") {
       return res.status(400).json({
         error: "UNKNOWN_FEATURE_TYPE",
-        details: `No pricing rule for feature_type=${feature_type} and no usable estimated_cost`
+        details: `No pricing rule for feature_type=${feature_type}`
       });
     }
 
-    // 1. nájdeme usera podľa wp_user_id
+    // user
     const user = await getUserByWpId(wp_user_id);
-    if (!user) {
-      return res.status(400).json({ error: "USER_NOT_FOUND" });
-    }
+    if (!user) return res.status(400).json({ error: "USER_NOT_FOUND" });
 
-    // 2. nájdeme aktívne predplatné + balance
+    // subscription & balance
     const { subscription, balance } = await getActiveSubscriptionAndBalance(user.id);
-
-    if (!subscription || !subscription.active) {
+    if (!subscription || !subscription.active)
       return res.status(403).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
-    }
+    if (!balance) return res.status(400).json({ error: "NO_BALANCE_RECORD" });
 
-    if (!balance) {
-      return res.status(400).json({ error: "NO_BALANCE_RECORD" });
-    }
-
-    // 3. kontrola kreditov
-    if (balance.credits_remaining < finalCost) {
+    if (balance.credits_remaining < finalCost)
       return res.status(402).json({ error: "INSUFFICIENT_CREDITS" });
-    }
 
-    // 4. odpočítanie kreditov + zápis do usage_logs (transakčne)
+    // transakčne odpočítať
     const connection = await db.getConnection();
     try {
       await connection.beginTransaction();
-
-      // znovu načítaj balance FOR UPDATE (lock)
       const [balRows] = await connection.execute(
         "SELECT * FROM credit_balances WHERE id = ? FOR UPDATE",
         [balance.id]
       );
-
       if (!balRows.length) {
         await connection.rollback();
         connection.release();
         return res.status(400).json({ error: "BALANCE_NOT_FOUND_AGAIN" });
       }
-
       const currentBalance = balRows[0];
-
       if (currentBalance.credits_remaining < finalCost) {
         await connection.rollback();
         connection.release();
@@ -243,27 +191,19 @@ app.post("/consume", async (req, res) => {
 
       const newBalance = currentBalance.credits_remaining - Number(finalCost);
 
-      // update credit_balances
       await connection.execute(
         "UPDATE credit_balances SET credits_remaining = ?, updated_at = NOW() WHERE id = ?",
         [newBalance, currentBalance.id]
       );
 
-      // insert usage_logs
       await connection.execute(
         "INSERT INTO usage_logs (user_id, feature_type, credits_spent, metadata) VALUES (?, ?, ?, ?)",
-        [
-          user.id,
-          feature_type,
-          finalCost,
-          metadata ? JSON.stringify(metadata) : null
-        ]
+        [user.id, feature_type, finalCost, metadata ? JSON.stringify(metadata) : null]
       );
 
       await connection.commit();
       connection.release();
 
-      // vraciame info naspäť
       return res.json({
         ok: true,
         credits_remaining: newBalance,
@@ -272,46 +212,26 @@ app.post("/consume", async (req, res) => {
     } catch (err) {
       await connection.rollback();
       connection.release();
-      console.error("TX ERROR", err.message, err.stack);
+      console.error("TX ERROR", err.message);
       return res.status(500).json({ error: "TX_FAILED", detail: err.message });
     }
   } catch (err) {
-    console.error("consume error", err.message, err.stack);
-    return res
-      .status(500)
-      .json({ error: "SERVER_ERROR", detail: err.message });
+    console.error("consume error", err.message);
+    return res.status(500).json({ error: "SERVER_ERROR", detail: err.message });
   }
 });
 
 // ===========================================================
-// 2) /usage/:wp_user_id  -> dashboard pre usera
-//
-// vráti:
-// {
-//   plan_id: "...",
-//   credits_remaining: 39000,
-//   monthly_credit_limit: 40000,
-//   cycle_end: "2025-11-26 ...",
-//   recent_usage: [ { timestamp, feature_type, credits_spent }, ... ]
-// }
+// 2) /usage/:wp_user_id
 app.get("/usage/:wp_user_id", async (req, res) => {
   try {
     const { wp_user_id } = req.params;
-
     const user = await getUserByWpId(wp_user_id);
-    if (!user) {
-      return res.status(400).json({ error: "USER_NOT_FOUND" });
-    }
+    if (!user) return res.status(400).json({ error: "USER_NOT_FOUND" });
 
-    const { subscription, balance } = await getActiveSubscriptionAndBalance(
-      user.id
-    );
+    const { subscription, balance } = await getActiveSubscriptionAndBalance(user.id);
+    if (!subscription) return res.status(404).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
 
-    if (!subscription) {
-      return res.status(404).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
-    }
-
-    // načítame posledné použitia
     const [logs] = await db.execute(
       `SELECT timestamp, feature_type, credits_spent
        FROM usage_logs
@@ -329,32 +249,13 @@ app.get("/usage/:wp_user_id", async (req, res) => {
       recent_usage: logs
     });
   } catch (err) {
-    console.error("usage error", err.message, err.stack);
-    return res
-      .status(500)
-      .json({ error: "SERVER_ERROR", detail: err.message });
+    console.error("usage error", err.message);
+    return res.status(500).json({ error: "SERVER_ERROR", detail: err.message });
   }
 });
 
 // ===========================================================
 // 3) /webhook/subscription-update
-//
-// Toto zavolá WordPress/MemberPress, keď niekto kúpi alebo zmení plán.
-// Očakávame body:
-// {
-//   "wp_user_id": 123,
-//   "email": "user@example.com",
-//   "plan_id": "pro",
-//   "monthly_credit_limit": 40000,
-//   "cycle_start": "2025-10-26 10:00:00",
-//   "cycle_end": "2025-11-26 10:00:00",
-//   "active": true
-// }
-//
-// Logika:
-// - ak user ešte neexistuje v `users`, vytvor ho
-// - vytvor/aktualizuj subscriptions
-// - ak začína nové billing obdobie => nastav credit_balances.credits_remaining = monthly_credit_limit
 app.post("/webhook/subscription-update", async (req, res) => {
   try {
     const {
@@ -367,47 +268,30 @@ app.post("/webhook/subscription-update", async (req, res) => {
       active
     } = req.body;
 
-    if (
-      !wp_user_id ||
-      !plan_id ||
-      !monthly_credit_limit ||
-      !cycle_start ||
-      !cycle_end
-    ) {
+    if (!wp_user_id || !plan_id || !monthly_credit_limit || !cycle_start || !cycle_end) {
       return res.status(400).json({
         error: "MISSING_FIELDS",
-        details:
-          "wp_user_id, plan_id, monthly_credit_limit, cycle_start, cycle_end are required"
+        details: "wp_user_id, plan_id, monthly_credit_limit, cycle_start, cycle_end are required"
       });
     }
 
-    // 1. user existuje?
     let user = await getUserByWpId(wp_user_id);
 
     if (!user) {
-      // vytvor nového usera
       const [result] = await db.execute(
         "INSERT INTO users (wp_user_id, email) VALUES (?, ?)",
         [wp_user_id, email || null]
       );
-
       const insertedId = result.insertId;
       const [rows] = await db.execute(
         "SELECT * FROM users WHERE id = ? LIMIT 1",
         [insertedId]
       );
       user = rows[0];
-    } else {
-      // user existuje -> môžeš prípadne aktualizovať email, ak chceš
-      if (email && email !== user.email) {
-        await db.execute("UPDATE users SET email = ? WHERE id = ?", [
-          email,
-          user.id
-        ]);
-      }
+    } else if (email && email !== user.email) {
+      await db.execute("UPDATE users SET email = ? WHERE id = ?", [email, user.id]);
     }
 
-    // 2. zapíš subscription
     await db.execute(
       `INSERT INTO subscriptions
         (user_id, plan_id, monthly_credit_limit, cycle_start, cycle_end, active)
@@ -418,17 +302,9 @@ app.post("/webhook/subscription-update", async (req, res) => {
         cycle_start = VALUES(cycle_start),
         cycle_end = VALUES(cycle_end),
         active = VALUES(active)`,
-      [
-        user.id,
-        plan_id,
-        monthly_credit_limit,
-        cycle_start,
-        cycle_end,
-        active ? 1 : 0
-      ]
+      [user.id, plan_id, monthly_credit_limit, cycle_start, cycle_end, active ? 1 : 0]
     );
 
-    // 3. nastav / obnov credit_balances pre toto nové obdobie
     await db.execute(
       `INSERT INTO credit_balances
         (user_id, cycle_start, credits_remaining, updated_at)
@@ -442,15 +318,13 @@ app.post("/webhook/subscription-update", async (req, res) => {
 
     return res.json({ ok: true });
   } catch (err) {
-    console.error("webhook error", err.message, err.stack);
-    return res
-      .status(500)
-      .json({ error: "SERVER_ERROR", detail: err.message });
+    console.error("webhook error", err.message);
+    return res.status(500).json({ error: "SERVER_ERROR", detail: err.message });
   }
 });
 
 // ===========================================================
-// API routy na tvoje AI služby
+// AI ROUTES
 app.use("/", deeplRoutes);
 app.use("/", elevenRoutes);
 app.use("/", geminiRoutes);
@@ -458,7 +332,56 @@ app.use("/", heygenRoutes);
 app.use("/", photoAvatarRoutes);
 app.use("/", klingRoutes);
 
-// štart
+// ===========================================================
+// 🆕 4) KLING V2.1 IMAGE-TO-VIDEO ENDPOINT
+import fetch from "node-fetch";
+
+app.post("/kling-i2v/generate", async (req, res) => {
+  try {
+    const {
+      image,
+      prompt,
+      mode = "Standard",
+      duration = "5",
+      guidance_scale = 0.5,
+      negative_prompt = ""
+    } = req.body;
+
+    if (!image || !prompt) {
+      return res.status(400).json({ ok: false, error: "MISSING_IMAGE_OR_PROMPT" });
+    }
+
+    const response = await fetch("https://api.novita.ai/v3/async/kling-v2.1-i2v", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.NOVITA_API_KEY}`
+      },
+      body: JSON.stringify({
+        image,
+        prompt,
+        mode,
+        duration,
+        guidance_scale,
+        negative_prompt
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.task_id) {
+      return res.json({ ok: true, generationId: data.task_id, status: "queued" });
+    } else {
+      return res.status(500).json({ ok: false, error: "NO_TASK_ID_RETURNED", raw: data });
+    }
+  } catch (err) {
+    console.error("Kling I2V error", err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ===========================================================
+// ŠTART
 initDB()
   .then(() => {
     app.listen(PORT, () => {
@@ -466,6 +389,6 @@ initDB()
     });
   })
   .catch((err) => {
-    console.error("DB INIT FAILED", err.message, err.stack);
+    console.error("DB INIT FAILED", err.message);
     process.exit(1);
   });
