@@ -8,9 +8,8 @@ import deeplRoutes from "./routes/deepl.js";
 import elevenRoutes from "./routes/elevenlabs.js";
 import geminiRoutes from "./routes/gemini.js";
 import heygenRoutes from "./routes/heygen.js";
-import photoAvatarRoutes from "./routes/photoAvatar.js"; 
+import photoAvatarRoutes from "./routes/photoAvatar.js";
 import klingRoutes from "./routes/kling.js";
-
 
 // Načítaj .env premenné (lokálne). Na Renderi to číta z Environment Variables.
 dotenv.config();
@@ -42,7 +41,7 @@ const app = express();
 // bezpečnostné hlavičky
 app.use(helmet());
 
-// CORS – povolíme tvoj web ai.developerska.eu
+// CORS – povolíme tvoj web
 app.use(
   cors({
     origin: "https://www.tvorai.cz",
@@ -113,18 +112,32 @@ async function getActiveSubscriptionAndBalance(user_id) {
 // ===========================================================
 // 1) /consume  -> použitie AI funkcie, odpočíta kredity a zaloguje
 //
-// request body očakáva:
+// Request body očakáva:
 // {
 //   "wp_user_id": 123,
-//   "feature_type": "translate_text" | "gemini_chat" | "heygen_video" | ...
-//   "metadata": {... optional info o požiadavke }
+//   "feature_type": "translate_text" | "gemini_chat" | "heygen_video" | "kling_video" | ...,
+//   "estimated_cost": 200,        // (voliteľné) konkrétna cena volania v kreditoch
+//   "metadata": {
+//       "duration": 5,           // napr. pri kling_video vieme 5s alebo 10s
+//       ...hocičo ďalšie
+//   }
 // }
 //
-// Dôležité: už NEberieme cenu z frontendu. Cenu určuje PRICING tu na backende.
+// Ako rátame cenu (finalCost):
+// 1. Ak prišlo estimated_cost z WordPressu -> použijeme to (napr. 200 alebo 500)
+// 2. Inak, ak feature_type === "kling_video" a metadata.duration existuje:
+//        duration 5s  -> 200 kreditov
+//        duration 10s -> 500 kreditov
+// 3. Inak fallback: použijeme PRICING[feature_type]
 // ===========================================================
 app.post("/consume", async (req, res) => {
   try {
-    const { wp_user_id, feature_type, metadata } = req.body;
+    const {
+      wp_user_id,
+      feature_type,
+      estimated_cost, // môže prísť z WordPressu (200 alebo 500)
+      metadata
+    } = req.body || {};
 
     // 0. validácia vstupu
     if (!wp_user_id || !feature_type) {
@@ -134,25 +147,50 @@ app.post("/consume", async (req, res) => {
       });
     }
 
-    // 💸 CENNÍK ZA FUNKCIE (TU SI NASTAV SVOJE CENY)
-    // Každý typ akcie = koľko kreditov stojí jedno použitie.
+    // 💸 CENNÍK ZA FUNKCIE (fallback ceny)
+    // Toto sú defaulty, použijú sa ak nemáme nič špecifické.
     const PRICING = {
       translate_text: 10,   // preklad textu (DeepL klon)
-      gemini_chat: 5,      // AI chat
-      heygen_video: 200,   // video avatar generácia
-      voice_tts: 2,        // text -> hlas
-      photo_avatar: 50,    // AI fotka/avatar
-      kling_video: 250,
-      test_feature: 10     // tvoj pôvodný test
-      
+      gemini_chat: 5,       // AI chat
+      heygen_video: 200,    // video avatar generácia
+      voice_tts: 2,         // text -> hlas
+      photo_avatar: 50,     // AI fotka/avatar
+      kling_video: 250,     // fallback pre KLING
+      test_feature: 10      // test
     };
 
-    // nájdeme cenu
-    const estimated_cost = PRICING[feature_type];
-    if (typeof estimated_cost === "undefined") {
+    // === 1. vyrátaj finalCost ===
+    let finalCost;
+
+    // (A) Ak klient poslal explicitne estimated_cost (napr. WP snippet dá 200 alebo 500),
+    //     použijeme ho.
+    if (typeof estimated_cost === "number" && !Number.isNaN(estimated_cost)) {
+      finalCost = estimated_cost;
+    } else {
+      // (B) Ak je to KLING video a máme metadata.duration,
+      //     urč cenu podľa dĺžky:
+      //     5s  -> 200 kreditov
+      //     10s -> 500 kreditov
+      if (feature_type === "kling_video" && metadata && metadata.duration) {
+        const d = Number(metadata.duration);
+        if (d === 5) {
+          finalCost = 200;
+        } else if (d === 10) {
+          finalCost = 500;
+        }
+      }
+
+      // (C) Fallback: ak stále nemáme finalCost, použi PRICING[feature_type]
+      if (typeof finalCost === "undefined") {
+        finalCost = PRICING[feature_type];
+      }
+    }
+
+    // Ak ani teraz nemáme cenu, nevieme účtovať
+    if (typeof finalCost === "undefined") {
       return res.status(400).json({
         error: "UNKNOWN_FEATURE_TYPE",
-        details: `No pricing rule for feature_type=${feature_type}`
+        details: `No pricing rule for feature_type=${feature_type} and no usable estimated_cost`
       });
     }
 
@@ -162,10 +200,8 @@ app.post("/consume", async (req, res) => {
       return res.status(400).json({ error: "USER_NOT_FOUND" });
     }
 
-    // 2. nájdeme aktívny subscription + balance
-    const { subscription, balance } = await getActiveSubscriptionAndBalance(
-      user.id
-    );
+    // 2. nájdeme aktívne predplatné + balance
+    const { subscription, balance } = await getActiveSubscriptionAndBalance(user.id);
 
     if (!subscription || !subscription.active) {
       return res.status(403).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
@@ -176,7 +212,7 @@ app.post("/consume", async (req, res) => {
     }
 
     // 3. kontrola kreditov
-    if (balance.credits_remaining < estimated_cost) {
+    if (balance.credits_remaining < finalCost) {
       return res.status(402).json({ error: "INSUFFICIENT_CREDITS" });
     }
 
@@ -199,14 +235,13 @@ app.post("/consume", async (req, res) => {
 
       const currentBalance = balRows[0];
 
-      if (currentBalance.credits_remaining < estimated_cost) {
+      if (currentBalance.credits_remaining < finalCost) {
         await connection.rollback();
         connection.release();
         return res.status(402).json({ error: "INSUFFICIENT_CREDITS" });
       }
 
-      const newBalance =
-        currentBalance.credits_remaining - Number(estimated_cost);
+      const newBalance = currentBalance.credits_remaining - Number(finalCost);
 
       // update credit_balances
       await connection.execute(
@@ -220,7 +255,7 @@ app.post("/consume", async (req, res) => {
         [
           user.id,
           feature_type,
-          estimated_cost,
+          finalCost,
           metadata ? JSON.stringify(metadata) : null
         ]
       );
@@ -228,10 +263,11 @@ app.post("/consume", async (req, res) => {
       await connection.commit();
       connection.release();
 
-      // vraciame, aby frontend vedel pokračovať (napr. zavolať samotný preklad)
+      // vraciame info naspäť
       return res.json({
         ok: true,
-        credits_remaining: newBalance
+        credits_remaining: newBalance,
+        charged: finalCost
       });
     } catch (err) {
       await connection.rollback();
@@ -240,7 +276,6 @@ app.post("/consume", async (req, res) => {
       return res.status(500).json({ error: "TX_FAILED", detail: err.message });
     }
   } catch (err) {
-    // sem padajú chyby ako "nedokážem sa pripojiť na DB", "access denied", atď.
     console.error("consume error", err.message, err.stack);
     return res
       .status(500)
@@ -253,10 +288,10 @@ app.post("/consume", async (req, res) => {
 //
 // vráti:
 // {
-//   plan_id: "...",                // ID plánu z subscriptions
-//   credits_remaining: 39000,      // zostatok kreditov
-//   monthly_credit_limit: 40000,   // mesačný balík
-//   cycle_end: "2025-11-26 ...",   // dokedy platí toto obdobie
+//   plan_id: "...",
+//   credits_remaining: 39000,
+//   monthly_credit_limit: 40000,
+//   cycle_end: "2025-11-26 ...",
 //   recent_usage: [ { timestamp, feature_type, credits_spent }, ... ]
 // }
 app.get("/usage/:wp_user_id", async (req, res) => {
@@ -415,7 +450,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
 });
 
 // ===========================================================
-// API routy na tvoje AI služby (to čo si mal)
+// API routy na tvoje AI služby
 app.use("/", deeplRoutes);
 app.use("/", elevenRoutes);
 app.use("/", geminiRoutes);
