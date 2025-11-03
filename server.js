@@ -12,6 +12,7 @@ import heygenRoutes from "./routes/heygen.js";
 import photoAvatarRoutes from "./routes/photoAvatar.js";
 import klingRoutes from "./routes/kling.js";        // KLING V1.6 text->video
 import klingI2vRoutes from "./routes/kling_i2v.js"; // KLING V2.1 image->video
+import klingV21MasterRoutes from "./routes/kling_v21_master.js"; // KLING V2.1 Master text->video (supports 9:16)
 
 // Načítaj .env (lokálne). Na Renderi ide z Environment Variables.
 dotenv.config();
