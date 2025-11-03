@@ -155,6 +155,7 @@ app.post("/consume", async (req, res) => {
       photo_avatar: 50,
       kling_video: 250, // fallback
       test_feature: 10,
+      kling_v21_t2v: 300, 
     };
 
     let finalCost;
@@ -425,6 +426,7 @@ app.use("/", heygenRoutes);
 app.use("/", photoAvatarRoutes);
 app.use("/", klingRoutes);       // text->video
 app.use("/", klingI2vRoutes);    // image->video
+app.use("/", klingV21MasterRoutes); // text->video (V2.1 Master, 9:16/1:1/16:9)
 
 // ===== START SERVER ==============================================
 initDB()
