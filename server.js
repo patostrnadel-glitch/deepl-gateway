@@ -57,10 +57,7 @@ app.use(
 app.options("*", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "https://www.tvorai.cz");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization"
-  );
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   return res.sendStatus(200);
 });
 
@@ -100,7 +97,7 @@ async function getActiveSubscriptionAndBalance(user_id) {
 
   const [balances] = await db.execute(
     `SELECT * FROM credit_balances
-     WHERE user_id = ?
+     WHERE user_id = ? 
      ORDER BY id DESC
      LIMIT 1`,
     [user_id]
@@ -116,29 +113,21 @@ async function getActiveSubscriptionAndBalance(user_id) {
 // Request body:
 // {
 //   "wp_user_id": 123,
-//   "feature_type": "translate_text" | "gemini_chat" | "heygen_video" | "kling_video" | ...,
-//   "estimated_cost": 200,        // voliteľné (napr. 200 alebo 500)
-//   "metadata": {
-//       "duration": 5,
-//       ...
-//   }
+//   "feature_type": "translate_text" | "gemini_chat" | "heygen_video" | "kling_video" | "kling_v25_i2v_imagine" | ...,
+//   "estimated_cost": 200, // voliteľné
+//   "metadata": { "duration": 5, "aspect_ratio": "16:9", ... }
 // }
 //
-// Ako rátame cenu (finalCost):
-// 1. Ak prišlo estimated_cost -> použijeme to.
-// 2. Ak feature_type === "kling_video" a metadata.duration:
-//       5  -> 200 kreditov
-//       10 -> 500 kreditov
-// 3. Inak fallback PRICING[feature_type].
+// Výpočet ceny (finalCost):
+// 1) ak príde estimated_cost -> použijeme ho
+// 2) špeciálne pravidlá:
+//    - kling_v25_i2v_imagine: podľa aspect_ratio + duration (viď TABLE)
+//    - kling_video: podľa duration (5 -> 200, 10 -> 500)
+// 3) inak fallback PRICING[feature_type]
 //
 app.post("/consume", async (req, res) => {
   try {
-    const {
-      wp_user_id,
-      feature_type,
-      estimated_cost,
-      metadata,
-    } = req.body || {};
+    const { wp_user_id, feature_type, estimated_cost, metadata } = req.body || {};
 
     if (!wp_user_id || !feature_type) {
       return res.status(400).json({
@@ -154,9 +143,10 @@ app.post("/consume", async (req, res) => {
       heygen_video: 200,
       voice_tts: 2,
       photo_avatar: 50,
-      kling_video: 250, // fallback
+      kling_video: 250,           // fallback
       test_feature: 10,
-      kling_v21_t2v: 300, 
+      kling_v21_t2v: 300,
+      kling_v25_i2v_imagine: 300, // fallback, ak by neprišli metadata
     };
 
     let finalCost;
@@ -165,17 +155,28 @@ app.post("/consume", async (req, res) => {
     if (typeof estimated_cost === "number" && !Number.isNaN(estimated_cost)) {
       finalCost = estimated_cost;
     } else {
-      // B) špeciálne pravidlo pre KLING video podľa dĺžky
-      if (feature_type === "kling_video" && metadata && metadata.duration) {
+      // B) KLING V2.5 I2V – podľa ratio + duration
+      if (feature_type === "kling_v25_i2v_imagine" && metadata) {
         const d = Number(metadata.duration);
-        if (d === 5) {
-          finalCost = 200;
-        } else if (d === 10) {
-          finalCost = 500;
+        const r = String(metadata.aspect_ratio || "").trim();
+        const TABLE = {
+          "1:1":  { 5: 280, 10: 680 },
+          "16:9": { 5: 300, 10: 700 },
+          "9:16": { 5: 320, 10: 740 },
+        };
+        if (TABLE[r] && TABLE[r][d]) {
+          finalCost = TABLE[r][d];
         }
       }
 
-      // C) fallback do tabulky
+      // C) existujúce pravidlo pre "kling_video" podľa dĺžky
+      if (typeof finalCost === "undefined" && feature_type === "kling_video" && metadata?.duration) {
+        const d = Number(metadata.duration);
+        if (d === 5) finalCost = 200;
+        else if (d === 10) finalCost = 500;
+      }
+
+      // D) fallback tabuľka
       if (typeof finalCost === "undefined") {
         finalCost = PRICING[feature_type];
       }
@@ -195,9 +196,7 @@ app.post("/consume", async (req, res) => {
     }
 
     // 2) subscription + balance
-    const { subscription, balance } = await getActiveSubscriptionAndBalance(
-      user.id
-    );
+    const { subscription, balance } = await getActiveSubscriptionAndBalance(user.id);
 
     if (!subscription || !subscription.active) {
       return res.status(403).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
@@ -236,8 +235,7 @@ app.post("/consume", async (req, res) => {
         return res.status(402).json({ error: "INSUFFICIENT_CREDITS" });
       }
 
-      const newBalance =
-        currentBalance.credits_remaining - Number(finalCost);
+      const newBalance = currentBalance.credits_remaining - Number(finalCost);
 
       // update credit_balances
       await connection.execute(
@@ -248,12 +246,7 @@ app.post("/consume", async (req, res) => {
       // insert usage_logs
       await connection.execute(
         "INSERT INTO usage_logs (user_id, feature_type, credits_spent, metadata) VALUES (?, ?, ?, ?)",
-        [
-          user.id,
-          feature_type,
-          finalCost,
-          metadata ? JSON.stringify(metadata) : null,
-        ]
+        [user.id, feature_type, finalCost, metadata ? JSON.stringify(metadata) : null]
       );
 
       await connection.commit();
@@ -268,21 +261,15 @@ app.post("/consume", async (req, res) => {
       await connection.rollback();
       connection.release();
       console.error("TX ERROR", err.message, err.stack);
-      return res
-        .status(500)
-        .json({ error: "TX_FAILED", detail: err.message });
+      return res.status(500).json({ error: "TX_FAILED", detail: err.message });
     }
   } catch (err) {
     console.error("consume error", err.message, err.stack);
-    return res
-      .status(500)
-      .json({ error: "SERVER_ERROR", detail: err.message });
+    return res.status(500).json({ error: "SERVER_ERROR", detail: err.message });
   }
 });
 
 // ===== /usage/:wp_user_id =========================================
-//
-// Dashboard info pre WP shortcode.
 app.get("/usage/:wp_user_id", async (req, res) => {
   try {
     const { wp_user_id } = req.params;
@@ -292,9 +279,7 @@ app.get("/usage/:wp_user_id", async (req, res) => {
       return res.status(400).json({ error: "USER_NOT_FOUND" });
     }
 
-    const { subscription, balance } = await getActiveSubscriptionAndBalance(
-      user.id
-    );
+    const { subscription, balance } = await getActiveSubscriptionAndBalance(user.id);
 
     if (!subscription) {
       return res.status(404).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
@@ -318,15 +303,11 @@ app.get("/usage/:wp_user_id", async (req, res) => {
     });
   } catch (err) {
     console.error("usage error", err.message, err.stack);
-    return res
-      .status(500)
-      .json({ error: "SERVER_ERROR", detail: err.message });
+    return res.status(500).json({ error: "SERVER_ERROR", detail: err.message });
   }
 });
 
 // ===== /webhook/subscription-update ===============================
-//
-// WP/MemberPress nám povie: nový plán, nový cyklus, nové kredity.
 app.post("/webhook/subscription-update", async (req, res) => {
   try {
     const {
@@ -339,17 +320,10 @@ app.post("/webhook/subscription-update", async (req, res) => {
       active,
     } = req.body;
 
-    if (
-      !wp_user_id ||
-      !plan_id ||
-      !monthly_credit_limit ||
-      !cycle_start ||
-      !cycle_end
-    ) {
+    if (!wp_user_id || !plan_id || !monthly_credit_limit || !cycle_start || !cycle_end) {
       return res.status(400).json({
         error: "MISSING_FIELDS",
-        details:
-          "wp_user_id, plan_id, monthly_credit_limit, cycle_start, cycle_end are required",
+        details: "wp_user_id, plan_id, monthly_credit_limit, cycle_start, cycle_end are required",
       });
     }
 
@@ -361,19 +335,12 @@ app.post("/webhook/subscription-update", async (req, res) => {
         "INSERT INTO users (wp_user_id, email) VALUES (?, ?)",
         [wp_user_id, email || null]
       );
-
       const insertedId = result.insertId;
-      const [rows] = await db.execute(
-        "SELECT * FROM users WHERE id = ? LIMIT 1",
-        [insertedId]
-      );
+      const [rows] = await db.execute("SELECT * FROM users WHERE id = ? LIMIT 1", [insertedId]);
       user = rows[0];
     } else {
       if (email && email !== user.email) {
-        await db.execute("UPDATE users SET email = ? WHERE id = ?", [
-          email,
-          user.id,
-        ]);
+        await db.execute("UPDATE users SET email = ? WHERE id = ?", [email, user.id]);
       }
     }
 
@@ -388,14 +355,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
         cycle_start = VALUES(cycle_start),
         cycle_end = VALUES(cycle_end),
         active = VALUES(active)`,
-      [
-        user.id,
-        plan_id,
-        monthly_credit_limit,
-        cycle_start,
-        cycle_end,
-        active ? 1 : 0,
-      ]
+      [user.id, plan_id, monthly_credit_limit, cycle_start, cycle_end, active ? 1 : 0]
     );
 
     // 3. credit_balances upsert
@@ -413,9 +373,7 @@ app.post("/webhook/subscription-update", async (req, res) => {
     return res.json({ ok: true });
   } catch (err) {
     console.error("webhook error", err.message, err.stack);
-    return res
-      .status(500)
-      .json({ error: "SERVER_ERROR", detail: err.message });
+    return res.status(500).json({ error: "SERVER_ERROR", detail: err.message });
   }
 });
 
@@ -425,10 +383,10 @@ app.use("/", elevenRoutes);
 app.use("/", geminiRoutes);
 app.use("/", heygenRoutes);
 app.use("/", photoAvatarRoutes);
-app.use("/", klingRoutes);       // text->video
-app.use("/", klingI2vRoutes);    // image->video
-app.use("/", klingV21MasterRoutes); // text->video (V2.1 Master, 9:16/1:1/16:9)
-app.use("/api", klingImagineRoutes);
+app.use("/", klingRoutes);            // text->video
+app.use("/", klingI2vRoutes);         // image->video
+app.use("/", klingV21MasterRoutes);   // text->video (V2.1 Master, 9:16/1:1/16:9)
+app.use("/api", klingImagineRoutes);  // V2.5 Imagine I2V
 
 // ===== START SERVER ==============================================
 initDB()
