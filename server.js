@@ -15,6 +15,9 @@ import klingI2vRoutes from "./routes/kling_i2v.js"; // KLING V2.1 image->video
 import klingV21MasterRoutes from "./routes/kling_v21_master.js"; // KLING V2.1 Master text->video (supports 9:16)
 import klingImagineRoutes from "./routes/kling-v2-5-turbo-imagine-i2v.js";
 
+// ✅ NOVÉ: V2.5 Turbo Text→Video route
+import klingV25TurboT2VRoutes from "./routes/kling-v2-5-turbo-text-to-video.js";
+
 // Načítaj .env (lokálne). Na Renderi ide z Environment Variables.
 dotenv.config();
 
@@ -137,6 +140,9 @@ app.post("/consume", async (req, res) => {
       test_feature: 10,
       kling_v21_t2v: 300,
       kling_v25_i2v_imagine: 300, // fallback, ak by neprišli metadata
+
+      // ✅ NOVÉ: V2.5 Turbo T2V fallback
+      kling_v25_t2v: 320
     };
 
     let finalCost;
@@ -156,6 +162,20 @@ app.post("/consume", async (req, res) => {
         };
         if (TABLE[r] && TABLE[r][d]) {
           finalCost = TABLE[r][d];
+        }
+      }
+
+      // ✅ B2) KLING V2.5 Turbo T2V – podľa ratio + duration
+      if (typeof finalCost === "undefined" && feature_type === "kling_v25_t2v" && metadata) {
+        const d = Number(metadata.duration);
+        const r = String(metadata.aspect_ratio || "").trim();
+        const TABLE_T2V = {
+          "1:1":  { 5: 300, 10: 700 },
+          "16:9": { 5: 320, 10: 720 },
+          "9:16": { 5: 340, 10: 760 },
+        };
+        if (TABLE_T2V[r] && TABLE_T2V[r][d]) {
+          finalCost = TABLE_T2V[r][d];
         }
       }
 
@@ -377,6 +397,9 @@ app.use("/", klingRoutes);            // text->video
 app.use("/", klingI2vRoutes);         // image->video
 app.use("/", klingV21MasterRoutes);   // text->video (V2.1 Master, 9:16/1:1/16:9)
 app.use("/api", klingImagineRoutes);  // V2.5 Imagine I2V
+
+// ✅ NOVÉ: mount pre V2.5 Turbo T2V
+app.use("/api", klingV25TurboT2VRoutes); // POST /kling-v25-t2v/generate, GET /kling-v25-t2v/status/:taskId
 
 // ===== START SERVER ==============================================
 initDB()
