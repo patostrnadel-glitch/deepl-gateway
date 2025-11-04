@@ -4,6 +4,7 @@ import cors from "cors";
 import helmet from "helmet";
 import mysql from "mysql2/promise";
 import dotenv from "dotenv";
+import https from "https"; // ⬅️ pridané: na zistenie verejnej IP
 
 import deeplRoutes from "./routes/deepl.js";
 import elevenRoutes from "./routes/elevenlabs.js";
@@ -139,6 +140,30 @@ app.get("/health/db", async (_req, res) => {
       message: err?.message,
       sqlMessage: err?.sqlMessage,
     });
+  }
+});
+
+// 🔎 Verejná odchádzajúca IP (pre whitelisting na DB/firewalle)
+app.get("/ip", (_req, res) => {
+  try {
+    const req = https.get("https://api.ipify.org", { timeout: 5000 }, (r) => {
+      let data = "";
+      r.on("data", (chunk) => (data += chunk));
+      r.on("end", () => {
+        const ip = (data || "").toString().trim();
+        if (!ip) return res.status(500).json({ ok: false, error: "NO_IP" });
+        res.json({ ok: true, public_ip: ip });
+      });
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      res.status(504).json({ ok: false, error: "IP_SERVICE_TIMEOUT" });
+    });
+    req.on("error", (e) => {
+      res.status(500).json({ ok: false, error: "IP_SERVICE_ERROR", message: e.message });
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "IP_ROUTE_ERROR", message: e.message });
   }
 });
 
