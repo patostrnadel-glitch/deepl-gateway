@@ -18,9 +18,6 @@ import klingImagineRoutes from "./routes/kling-v2-5-turbo-imagine-i2v.js";
 // ✅ NOVÉ: V2.5 Turbo Text→Video route
 import klingV25TurboT2VRoutes from "./routes/kling-v2-5-turbo-text-to-video.js";
 
-// ✅ NOVÉ: Novita Seedream 4.0 Text→Image route
-import seedream4Routes from "./routes/seedream4.js";
-
 // Načítaj .env (lokálne). Na Renderi ide z Environment Variables.
 dotenv.config();
 
@@ -77,7 +74,7 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-// ===== HELPERS =================================================
+// ===== HELPERS ==================================================
 // načíta z tab. users podľa wp_user_id
 async function getUserByWpId(wp_user_id) {
   const [rows] = await db.execute(
@@ -145,10 +142,7 @@ app.post("/consume", async (req, res) => {
       kling_v25_i2v_imagine: 300, // fallback, ak by neprišli metadata
 
       // ✅ NOVÉ: V2.5 Turbo T2V fallback
-      kling_v25_t2v: 320,
-
-      // ✅ NOVÉ: Novita Seedream 4.0 Text→Image
-      seedream4_t2i: 100
+      kling_v25_t2v: 320
     };
 
     let finalCost;
@@ -183,11 +177,6 @@ app.post("/consume", async (req, res) => {
         if (TABLE_T2V[r] && TABLE_T2V[r][d]) {
           finalCost = TABLE_T2V[r][d];
         }
-      }
-
-      // ✅ B3) Novita Seedream 4.0 T2I – fixná cena
-      if (typeof finalCost === "undefined" && feature_type === "seedream4_t2i") {
-        finalCost = PRICING.seedream4_t2i; // 100
       }
 
       // C) existujúce pravidlo pre "kling_video" podľa dĺžky
@@ -411,10 +400,6 @@ app.use("/api", klingImagineRoutes);  // V2.5 Imagine I2V
 
 // ✅ NOVÉ: mount pre V2.5 Turbo T2V
 app.use("/api", klingV25TurboT2VRoutes); // POST /kling-v25-t2v/generate, GET /kling-v25-t2v/status/:taskId
-
-// ✅ NOVÉ: mount pre Novita Seedream 4.0 Text→Image
-// POST /seedream4/generate, GET /seedream4/sizes
-app.use("/", seedream4Routes);
 
 // ===== START SERVER ==============================================
 initDB()
