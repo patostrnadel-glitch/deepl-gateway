@@ -70,8 +70,26 @@ app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ limit: "25mb", extended: true }));
 
 // health
+// health
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+// 🔎 DB ping (diagnostika)
+app.get("/health/db", async (_req, res) => {
+  try {
+    const [r] = await db.query("SELECT 1 AS ok");
+    res.json({ ok: true, result: r });
+  } catch (err) {
+    console.error("DB health error", err?.message, err?.code, err?.sqlMessage);
+    res.status(500).json({
+      ok: false,
+      code: err?.code,
+      errno: err?.errno,
+      message: err?.message,
+      sqlMessage: err?.sqlMessage
+    });
+  }
 });
 
 // ===== HELPERS ==================================================
