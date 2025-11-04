@@ -50,6 +50,7 @@ app.use(
     origin: "https://www.tvorai.cz",
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: false,
   })
 );
 
@@ -61,8 +62,9 @@ app.options("*", (req, res) => {
   return res.sendStatus(200);
 });
 
-// JSON body
-app.use(express.json({ limit: "1mb" }));
+// ⬆️ DÔLEŽITÉ: väčší limit kvôli base64 (10 MB súbor ≈ 13–14 MB base64)
+app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ limit: "25mb", extended: true }));
 
 // health
 app.get("/health", (_req, res) => {
@@ -111,19 +113,7 @@ async function getActiveSubscriptionAndBalance(user_id) {
 // ===== /consume =================================================
 //
 // Request body:
-// {
-//   "wp_user_id": 123,
-//   "feature_type": "translate_text" | "gemini_chat" | "heygen_video" | "kling_video" | "kling_v25_i2v_imagine" | ...,
-//   "estimated_cost": 200, // voliteľné
-//   "metadata": { "duration": 5, "aspect_ratio": "16:9", ... }
-// }
-//
-// Výpočet ceny (finalCost):
-// 1) ak príde estimated_cost -> použijeme ho
-// 2) špeciálne pravidlá:
-//    - kling_v25_i2v_imagine: podľa aspect_ratio + duration (viď TABLE)
-//    - kling_video: podľa duration (5 -> 200, 10 -> 500)
-// 3) inak fallback PRICING[feature_type]
+// { wp_user_id, feature_type, estimated_cost?, metadata? }
 //
 app.post("/consume", async (req, res) => {
   try {
@@ -152,8 +142,8 @@ app.post("/consume", async (req, res) => {
     let finalCost;
 
     // A) explicitná cena z WP
-    if (typeof estimated_cost === "number" && !Number.isNaN(estimated_cost)) {
-      finalCost = estimated_cost;
+    if (typeof estimated_cost === "number" && Number.isFinite(estimated_cost)) {
+      finalCost = Math.max(0, Math.floor(estimated_cost));
     } else {
       // B) KLING V2.5 I2V – podľa ratio + duration
       if (feature_type === "kling_v25_i2v_imagine" && metadata) {
