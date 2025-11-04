@@ -27,6 +27,8 @@ const dbConfig = {
   user: process.env.DB_USER,
   password: process.env.DB_PASS,
   database: process.env.DB_NAME,
+  // ✅ Voliteľné SSL (ak provider vyžaduje TLS). Zapni v env: DB_SSL=true
+  ...(process.env.DB_SSL === "true" ? { ssl: { rejectUnauthorized: false } } : {}),
 };
 
 let db;
@@ -37,7 +39,12 @@ async function initDB() {
     connectionLimit: 10,
     queueLimit: 0,
   });
-  console.log("✅ DB pool ready");
+  console.log("✅ DB pool ready", {
+    host: dbConfig.host,
+    user: dbConfig.user,
+    db: dbConfig.database,
+    ssl: !!dbConfig.ssl,
+  });
 }
 
 // ===== EXPRESS APP ==============================================
@@ -47,10 +54,17 @@ const PORT = process.env.PORT || 8080;
 // security headers
 app.use(helmet());
 
-// CORS – povoľujeme tvoj web
+// CORS – povoľujeme tvoje domény
+const ALLOWED_ORIGINS = [
+  "https://www.tvorai.cz",
+  "https://tvorai.cz",
+];
 app.use(
   cors({
-    origin: "https://www.tvorai.cz",
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true); // curl/Postman
+      return callback(null, ALLOWED_ORIGINS.includes(origin));
+    },
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: false,
@@ -59,7 +73,11 @@ app.use(
 
 // preflight
 app.options("*", (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "https://www.tvorai.cz");
+  const reqOrigin = req.headers.origin;
+  res.setHeader(
+    "Access-Control-Allow-Origin",
+    ALLOWED_ORIGINS.includes(reqOrigin) ? reqOrigin : ALLOWED_ORIGINS[0]
+  );
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   return res.sendStatus(200);
@@ -69,15 +87,26 @@ app.options("*", (req, res) => {
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ limit: "25mb", extended: true }));
 
-// health
-// health
+// ===== HEALTH & DIAG ============================================
+// základný health
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+// identita buildu (pomôže overiť, že beží nový deploy)
+app.get("/whoami", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "deepl-gateway",
+    build_tag: process.env.BUILD_TAG || `manual-${new Date().toISOString()}`,
+    node: process.version,
+  });
 });
 
 // 🔎 DB ping (diagnostika)
 app.get("/health/db", async (_req, res) => {
   try {
+    if (!db) return res.status(503).json({ ok: false, error: "DB_NOT_READY" });
     const [r] = await db.query("SELECT 1 AS ok");
     res.json({ ok: true, result: r });
   } catch (err) {
@@ -87,7 +116,7 @@ app.get("/health/db", async (_req, res) => {
       code: err?.code,
       errno: err?.errno,
       message: err?.message,
-      sqlMessage: err?.sqlMessage
+      sqlMessage: err?.sqlMessage,
     });
   }
 });
@@ -95,11 +124,22 @@ app.get("/health/db", async (_req, res) => {
 // ===== HELPERS ==================================================
 // načíta z tab. users podľa wp_user_id
 async function getUserByWpId(wp_user_id) {
-  const [rows] = await db.execute(
-    "SELECT * FROM users WHERE wp_user_id = ? LIMIT 1",
-    [wp_user_id]
-  );
-  return rows.length ? rows[0] : null;
+  try {
+    const [rows] = await db.execute(
+      "SELECT * FROM users WHERE wp_user_id = ? LIMIT 1",
+      [wp_user_id]
+    );
+    return rows.length ? rows[0] : null;
+  } catch (err) {
+    console.error("getUserByWpId DB error:", {
+      code: err?.code,
+      errno: err?.errno,
+      sqlState: err?.sqlState,
+      sqlMessage: err?.sqlMessage,
+      message: err?.message,
+    });
+    throw err;
+  }
 }
 
 // načíta aktívne predplatné + kredity
@@ -159,8 +199,8 @@ app.post("/consume", async (req, res) => {
       kling_v21_t2v: 300,
       kling_v25_i2v_imagine: 300, // fallback, ak by neprišli metadata
 
-      // ✅ NOVÉ: V2.5 Turbo T2V fallback
-      kling_v25_t2v: 320
+      // ✅ V2.5 Turbo T2V fallback
+      kling_v25_t2v: 320,
     };
 
     let finalCost;
@@ -416,7 +456,7 @@ app.use("/", klingI2vRoutes);         // image->video
 app.use("/", klingV21MasterRoutes);   // text->video (V2.1 Master, 9:16/1:1/16:9)
 app.use("/api", klingImagineRoutes);  // V2.5 Imagine I2V
 
-// ✅ NOVÉ: mount pre V2.5 Turbo T2V
+// ✅ V2.5 Turbo T2V
 app.use("/api", klingV25TurboT2VRoutes); // POST /kling-v25-t2v/generate, GET /kling-v25-t2v/status/:taskId
 
 // ===== START SERVER ==============================================
