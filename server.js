@@ -14,12 +14,15 @@ import klingRoutes from "./routes/kling.js";        // KLING V1.6 text->video
 import klingI2vRoutes from "./routes/kling_i2v.js"; // KLING V2.1 image->video
 import klingV21MasterRoutes from "./routes/kling_v21_master.js"; // KLING V2.1 Master text->video (supports 9:16)
 import klingImagineRoutes from "./routes/kling-v2-5-turbo-imagine-i2v.js";
-
-// ✅ NOVÉ: V2.5 Turbo Text→Video route
+// ✅ V2.5 Turbo Text→Video
 import klingV25TurboT2VRoutes from "./routes/kling-v2-5-turbo-text-to-video.js";
 
 // Načítaj .env (lokálne). Na Renderi ide z Environment Variables.
 dotenv.config();
+
+// ===== ENV PREPÍNAČE ============================================
+const PORT = process.env.PORT || 8080;
+const SKIP_DB = process.env.DEBUG_SKIP_DB === "true";
 
 // ===== DB CONFIG =================================================
 const dbConfig = {
@@ -27,9 +30,14 @@ const dbConfig = {
   user: process.env.DB_USER,
   password: process.env.DB_PASS,
   database: process.env.DB_NAME,
+  // Voliteľné SSL: nastav v ENV DB_SSL=true, ak provider vyžaduje TLS
+  ...(process.env.DB_SSL === "true" ? { ssl: { rejectUnauthorized: false } } : {}),
 };
 
-let db;
+let db;         // mysql Pool
+let DB_READY = false;
+
+// vytvorí pool (bez retry) – retry riešime mimo
 async function initDB() {
   db = await mysql.createPool({
     ...dbConfig,
@@ -37,20 +45,43 @@ async function initDB() {
     connectionLimit: 10,
     queueLimit: 0,
   });
-  console.log("✅ DB pool ready");
+  console.log("✅ DB pool ready", {
+    host: dbConfig.host,
+    user: dbConfig.user,
+    db: dbConfig.database,
+    ssl: !!dbConfig.ssl,
+  });
+}
+
+// retry wrapper s backoffom
+async function initDBWithRetry(retry = 0) {
+  try {
+    await initDB();
+    await db.query("SELECT 1 AS ok"); // sanity ping
+    DB_READY = true;
+    console.log("✅ DB ready & ping OK");
+  } catch (err) {
+    DB_READY = false;
+    const delay = Math.min(30000, 2000 * (retry + 1));
+    console.error(`❌ DB init failed (try ${retry + 1}):`, err?.message);
+    setTimeout(() => initDBWithRetry(retry + 1), delay);
+  }
 }
 
 // ===== EXPRESS APP ==============================================
 const app = express();
-const PORT = process.env.PORT || 8080;
 
 // security headers
 app.use(helmet());
 
-// CORS – povoľujeme tvoj web
+// CORS – povoľujeme tvoje domény
+const ALLOWED_ORIGINS = ["https://www.tvorai.cz", "https://tvorai.cz"];
 app.use(
   cors({
-    origin: "https://www.tvorai.cz",
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // curl/Postman
+      return cb(null, ALLOWED_ORIGINS.includes(origin));
+    },
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: false,
@@ -59,29 +90,77 @@ app.use(
 
 // preflight
 app.options("*", (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "https://www.tvorai.cz");
+  const reqOrigin = req.headers.origin;
+  res.setHeader(
+    "Access-Control-Allow-Origin",
+    ALLOWED_ORIGINS.includes(reqOrigin) ? reqOrigin : ALLOWED_ORIGINS[0]
+  );
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   return res.sendStatus(200);
 });
 
-// ⬆️ DÔLEŽITÉ: väčší limit kvôli base64 (10 MB súbor ≈ 13–14 MB base64)
+// väčší limit kvôli base64 (10 MB súbor ≈ 13–14 MB base64)
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ limit: "25mb", extended: true }));
 
-// health
+// ===== HEALTH & DIAG ============================================
+// základný health
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+// identita buildu (pomáha overiť, že beží nový deploy)
+app.get("/whoami", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "deepl-gateway",
+    build_tag: process.env.BUILD_TAG || `manual-${new Date().toISOString()}`,
+    node: process.version,
+    skip_db: SKIP_DB,
+    db_ready: DB_READY,
+  });
+});
+
+// DB ping
+app.get("/health/db", async (_req, res) => {
+  try {
+    if (SKIP_DB) return res.status(503).json({ ok: false, ready: false, error: "DB_SKIPPED" });
+    if (!db || !DB_READY) return res.status(503).json({ ok: false, ready: false, error: "DB_NOT_READY" });
+    const [r] = await db.query("SELECT 1 AS ok");
+    res.json({ ok: true, ready: true, result: r });
+  } catch (err) {
+    console.error("DB health error", err?.message, err?.code, err?.sqlMessage);
+    res.status(500).json({
+      ok: false,
+      ready: false,
+      code: err?.code,
+      errno: err?.errno,
+      message: err?.message,
+      sqlMessage: err?.sqlMessage,
+    });
+  }
 });
 
 // ===== HELPERS ==================================================
 // načíta z tab. users podľa wp_user_id
 async function getUserByWpId(wp_user_id) {
-  const [rows] = await db.execute(
-    "SELECT * FROM users WHERE wp_user_id = ? LIMIT 1",
-    [wp_user_id]
-  );
-  return rows.length ? rows[0] : null;
+  try {
+    const [rows] = await db.execute(
+      "SELECT * FROM users WHERE wp_user_id = ? LIMIT 1",
+      [wp_user_id]
+    );
+    return rows.length ? rows[0] : null;
+  } catch (err) {
+    console.error("getUserByWpId DB error:", {
+      code: err?.code,
+      errno: err?.errno,
+      sqlState: err?.sqlState,
+      sqlMessage: err?.sqlMessage,
+      message: err?.message,
+    });
+    throw err;
+  }
 }
 
 // načíta aktívne predplatné + kredity
@@ -113,6 +192,21 @@ async function getActiveSubscriptionAndBalance(user_id) {
   return { subscription, balance };
 }
 
+// ===== DB-GUARD MIDDLEWARE (len pre DB závislé cesty) ===========
+const needsDB = (path) =>
+  path === "/consume" ||
+  path === "/webhook/subscription-update" ||
+  path.startsWith("/usage/");
+
+app.use((req, res, next) => {
+  if (!needsDB(req.path)) return next();
+  if (SKIP_DB || !db || !DB_READY) {
+    console.warn("⚠️ DB not ready, blocking request:", req.path);
+    return res.status(503).json({ ok: false, error: SKIP_DB ? "DB_SKIPPED" : "DB_NOT_READY" });
+  }
+  next();
+});
+
 // ===== /consume =================================================
 //
 // Request body:
@@ -140,9 +234,8 @@ app.post("/consume", async (req, res) => {
       test_feature: 10,
       kling_v21_t2v: 300,
       kling_v25_i2v_imagine: 300, // fallback, ak by neprišli metadata
-
-      // ✅ NOVÉ: V2.5 Turbo T2V fallback
-      kling_v25_t2v: 320
+      // V2.5 Turbo T2V fallback
+      kling_v25_t2v: 320,
     };
 
     let finalCost;
@@ -160,12 +253,10 @@ app.post("/consume", async (req, res) => {
           "16:9": { 5: 300, 10: 700 },
           "9:16": { 5: 320, 10: 740 },
         };
-        if (TABLE[r] && TABLE[r][d]) {
-          finalCost = TABLE[r][d];
-        }
+        if (TABLE[r] && TABLE[r][d]) finalCost = TABLE[r][d];
       }
 
-      // ✅ B2) KLING V2.5 Turbo T2V – podľa ratio + duration
+      // B2) KLING V2.5 Turbo T2V – podľa ratio + duration
       if (typeof finalCost === "undefined" && feature_type === "kling_v25_t2v" && metadata) {
         const d = Number(metadata.duration);
         const r = String(metadata.aspect_ratio || "").trim();
@@ -174,9 +265,7 @@ app.post("/consume", async (req, res) => {
           "16:9": { 5: 320, 10: 720 },
           "9:16": { 5: 340, 10: 760 },
         };
-        if (TABLE_T2V[r] && TABLE_T2V[r][d]) {
-          finalCost = TABLE_T2V[r][d];
-        }
+        if (TABLE_T2V[r] && TABLE_T2V[r][d]) finalCost = TABLE_T2V[r][d];
       }
 
       // C) existujúce pravidlo pre "kling_video" podľa dĺžky
@@ -201,20 +290,12 @@ app.post("/consume", async (req, res) => {
 
     // 1) user
     const user = await getUserByWpId(wp_user_id);
-    if (!user) {
-      return res.status(400).json({ error: "USER_NOT_FOUND" });
-    }
+    if (!user) return res.status(400).json({ error: "USER_NOT_FOUND" });
 
     // 2) subscription + balance
     const { subscription, balance } = await getActiveSubscriptionAndBalance(user.id);
-
-    if (!subscription || !subscription.active) {
-      return res.status(403).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
-    }
-
-    if (!balance) {
-      return res.status(400).json({ error: "NO_BALANCE_RECORD" });
-    }
+    if (!subscription || !subscription.active) return res.status(403).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
+    if (!balance) return res.status(400).json({ error: "NO_BALANCE_RECORD" });
 
     // 3) dosť kreditov?
     if (balance.credits_remaining < finalCost) {
@@ -232,16 +313,13 @@ app.post("/consume", async (req, res) => {
       );
 
       if (!balRows.length) {
-        await connection.rollback();
-        connection.release();
+        await connection.rollback(); connection.release();
         return res.status(400).json({ error: "BALANCE_NOT_FOUND_AGAIN" });
       }
 
       const currentBalance = balRows[0];
-
       if (currentBalance.credits_remaining < finalCost) {
-        await connection.rollback();
-        connection.release();
+        await connection.rollback(); connection.release();
         return res.status(402).json({ error: "INSUFFICIENT_CREDITS" });
       }
 
@@ -262,14 +340,9 @@ app.post("/consume", async (req, res) => {
       await connection.commit();
       connection.release();
 
-      return res.json({
-        ok: true,
-        credits_remaining: newBalance,
-        charged: finalCost,
-      });
+      return res.json({ ok: true, credits_remaining: newBalance, charged: finalCost });
     } catch (err) {
-      await connection.rollback();
-      connection.release();
+      await connection.rollback(); connection.release();
       console.error("TX ERROR", err.message, err.stack);
       return res.status(500).json({ error: "TX_FAILED", detail: err.message });
     }
@@ -285,15 +358,10 @@ app.get("/usage/:wp_user_id", async (req, res) => {
     const { wp_user_id } = req.params;
 
     const user = await getUserByWpId(wp_user_id);
-    if (!user) {
-      return res.status(400).json({ error: "USER_NOT_FOUND" });
-    }
+    if (!user) return res.status(400).json({ error: "USER_NOT_FOUND" });
 
     const { subscription, balance } = await getActiveSubscriptionAndBalance(user.id);
-
-    if (!subscription) {
-      return res.status(404).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
-    }
+    if (!subscription) return res.status(404).json({ error: "NO_ACTIVE_SUBSCRIPTION" });
 
     const [logs] = await db.execute(
       `SELECT timestamp, feature_type, credits_spent
@@ -397,18 +465,10 @@ app.use("/", klingRoutes);            // text->video
 app.use("/", klingI2vRoutes);         // image->video
 app.use("/", klingV21MasterRoutes);   // text->video (V2.1 Master, 9:16/1:1/16:9)
 app.use("/api", klingImagineRoutes);  // V2.5 Imagine I2V
-
-// ✅ NOVÉ: mount pre V2.5 Turbo T2V
-app.use("/api", klingV25TurboT2VRoutes); // POST /kling-v25-t2v/generate, GET /kling-v25-t2v/status/:taskId
+app.use("/api", klingV25TurboT2VRoutes); // V2.5 Turbo T2V
 
 // ===== START SERVER ==============================================
-initDB()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`🚀 API gateway running on port ${PORT}`);
-    });
-  })
-  .catch((err) => {
-    console.error("DB INIT FAILED", err.message, err.stack);
-    process.exit(1);
-  });
+app.listen(PORT, () => {
+  console.log(`🚀 API gateway running on port ${PORT}`, { skip_db: SKIP_DB });
+  if (!SKIP_DB) initDBWithRetry();
+});
