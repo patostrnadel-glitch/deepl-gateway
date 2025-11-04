@@ -13,6 +13,7 @@ import photoAvatarRoutes from "./routes/photoAvatar.js";
 import klingRoutes from "./routes/kling.js";        // KLING V1.6 text->video
 import klingI2vRoutes from "./routes/kling_i2v.js"; // KLING V2.1 image->video
 import klingV21MasterRoutes from "./routes/kling_v21_master.js"; // KLING V2.1 Master text->video (supports 9:16)
+import klingImagineRoutes from "./routes/kling-v2-5-turbo-imagine-i2v.js";
 
 // Načítaj .env (lokálne). Na Renderi ide z Environment Variables.
 dotenv.config();
@@ -427,6 +428,7 @@ app.use("/", photoAvatarRoutes);
 app.use("/", klingRoutes);       // text->video
 app.use("/", klingI2vRoutes);    // image->video
 app.use("/", klingV21MasterRoutes); // text->video (V2.1 Master, 9:16/1:1/16:9)
+app.use("/api", klingImagineRoutes);
 
 // ===== START SERVER ==============================================
 initDB()
